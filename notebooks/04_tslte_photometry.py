@@ -1,0 +1,201 @@
+# ---
+# jupyter:
+#   jupytext:
+#     formats: py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # Stellar parameters from the TSLTE pre-integrated photometry grid
+#
+# The real thing: `TSLTE_combined_photometry.fits` (A. Chiti's Turbospectrum LTE
+# synthetic photometry — the MAGIC grid) loaded into tengri-stars, a mock star
+# drawn from it, and the full posterior workflow of notebook 01 — NSS and NUTS
+# side by side — on pre-filter-integrated magnitudes. No wavelength integral
+# anywhere: fit-time photometry is one differentiable grid lookup.
+#
+# Get the grid (from a Sherlock login):
+# ```bash
+# scp <sunetid>@login.sherlock.stanford.edu:\
+#     /oak/stanford/orgs/kipac/users/achiti/grid/TSLTE_combined_photometry.fits \
+#     ~/Projects/tengri-stars/data/
+# ```
+
+# %%
+import time
+
+import corner
+import jax
+import jax.numpy as jnp
+import matplotlib.pyplot as plt
+import numpy as np
+from tengri import Uniform
+
+from tengri_stars import StarModel, fit_nss, fit_nuts, load_photometry_grid
+
+jax.config.update("jax_enable_x64", True)
+rng = np.random.default_rng(17)
+
+GRID_PATH = "data/TSLTE_combined_photometry.fits"
+
+# %% [markdown]
+# ## 1. Load the grid
+#
+# The loader prefers `averaged=True` rows on duplicate nodes and rejects the
+# duplicated label columns (`Teff_1`, `[Fe/H]_1`, ...). Synthetic grids are
+# rarely perfect boxes, so fall back to nearest-neighbor hole filling and keep
+# the coverage mask.
+
+# %%
+try:
+    grid = load_photometry_grid(GRID_PATH)
+except ValueError as err:
+    print(f"strict load: {err}\n→ retrying with fill='nearest'")
+    grid = load_photometry_grid(GRID_PATH, fill="nearest")
+
+n_teff, n_logg, n_feh = (a.shape[0] for a in grid.axes)
+covered = float(grid.coverage.mean())
+print(f"axes: {n_teff} Teff × {n_logg} logg × {n_feh} [Fe/H] nodes, {covered:.1%} covered")
+print(f"Teff  [{float(grid.axes[0][0]):7.0f}, {float(grid.axes[0][-1]):7.0f}] K")
+print(f"logg  [{float(grid.axes[1][0]):7.2f}, {float(grid.axes[1][-1]):7.2f}]")
+print(f"[Fe/H][{float(grid.axes[2][0]):7.2f}, {float(grid.axes[2][-1]):7.2f}]")
+print(f"{len(grid.filter_names)} filters: {grid.filter_names}")
+
+# %% [markdown]
+# ## 2. Coverage map
+#
+# Fraction of [Fe/H] nodes present per (Teff, log g) cell — the white regions are
+# where `fill='nearest'` extrapolated and posteriors should not be trusted.
+
+# %%
+frac = np.asarray(grid.coverage).mean(axis=2)
+fig, ax = plt.subplots(figsize=(7, 4))
+im = ax.pcolormesh(
+    np.asarray(grid.axes[0]),
+    np.asarray(grid.axes[1]),
+    frac.T,
+    cmap="viridis",
+    vmin=0,
+    vmax=1,
+    shading="nearest",
+)
+fig.colorbar(im, label="fraction of [Fe/H] nodes covered")
+ax.set(xlabel=r"$T_{\rm eff}$ [K]", ylabel=r"$\log g$")
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# ## 3. Filters and a mock star
+#
+# Edit `FILTERS_USE` to the survey combination you care about (default: all
+# columns in the file). The mock star sits at interior grid values; magnitudes
+# get survey-like noise and the dilution μ shifts them to apparent scale.
+
+# %%
+FILTERS_USE = list(grid.filter_names)  # e.g. ["lsst_g_ab", "skymapper_v_ab", "cahk", ...]
+fidx = jnp.asarray([grid.filter_names.index(f) for f in FILTERS_USE])
+
+model = StarModel(grid=grid, interp_method="pchip")
+
+TRUTH = {
+    "teff": float(np.median(np.asarray(grid.axes[0]))),
+    "logg": float(np.asarray(grid.axes[1])[n_logg // 3]),
+    "feh": float(np.asarray(grid.axes[2])[n_feh // 3]),
+    "mu": -18.0,  # grid zero-point → apparent-mag offset, absorbed by the fit
+}
+SIG_MAG = 0.02
+
+mags_clean = model.predict_mags(**TRUTH)[fidx]
+mags_obs = jnp.asarray(np.asarray(mags_clean) + rng.normal(0.0, SIG_MAG, len(FILTERS_USE)))
+print("mock star:", {k: round(v, 2) for k, v in TRUTH.items()})
+print("observed mags:", dict(zip(FILTERS_USE, np.round(np.asarray(mags_obs), 2))))
+
+# %% [markdown]
+# ## 4. Fit: NSS and NUTS on the same posterior
+
+# %%
+lo_hi = [(float(a[0]), float(a[-1])) for a in grid.axes]
+priors = {
+    "teff": Uniform(*lo_hi[0]),
+    "logg": Uniform(*lo_hi[1]),
+    "feh": Uniform(*lo_hi[2]),
+    "mu": Uniform(TRUTH["mu"] - 10.0, TRUTH["mu"] + 10.0),
+}
+
+
+def loglikelihood(p):
+    pred = model.predict_mags(teff=p["teff"], logg=p["logg"], feh=p["feh"], mu=p["mu"])[fidx]
+    return -0.5 * jnp.sum(((pred - mags_obs) / SIG_MAG) ** 2)
+
+
+t0 = time.time()
+nss = fit_nss(loglikelihood, priors, key=jax.random.PRNGKey(2), n_live=400, num_delete=40)
+print(f"NSS:  {time.time() - t0:5.1f} s  log Z = {nss.logz:.1f}  ESS = {nss.ess:.0f}")
+
+t0 = time.time()
+nuts = fit_nuts(loglikelihood, priors, key=jax.random.PRNGKey(3), num_warmup=800, num_samples=1500)
+print(
+    f"NUTS: {time.time() - t0:5.1f} s  acceptance {nuts.acceptance_rate:.2f}, "
+    f"{nuts.num_divergent} divergences"
+)
+
+# %% [markdown]
+# ## 5. Posteriors
+
+# %%
+names = list(priors)
+labels_tex = [r"$T_{\rm eff}$ [K]", r"$\log g$", "[Fe/H]", r"$\mu$"]
+truth_vec = [TRUTH[n] for n in names]
+
+nss_stack = np.column_stack([np.asarray(nss.samples[n]) for n in names])
+nuts_stack = np.column_stack([np.asarray(nuts.samples[n]) for n in names])
+
+fig = corner.corner(
+    nss_stack,
+    labels=labels_tex,
+    truths=truth_vec,
+    color="C0",
+    hist_kwargs={"density": True},
+    plot_datapoints=False,
+    smooth=1.0,
+)
+corner.corner(
+    nuts_stack,
+    fig=fig,
+    color="C1",
+    hist_kwargs={"density": True},
+    plot_datapoints=False,
+    smooth=1.0,
+)
+fig.legend(
+    handles=[
+        plt.Line2D([], [], color="C0", label=f"NSS ({nss.wall_time:.0f} s)"),
+        plt.Line2D([], [], color="C1", label=f"NUTS ({nuts.wall_time:.0f} s)"),
+    ],
+    loc="upper right",
+    frameon=False,
+)
+plt.show()
+
+med, ci = nss.median(), nss.interval(0.68)
+print(f"{'':6s}{'truth':>9s}{'NSS median':>12s}{'68% interval':>22s}")
+for n in names:
+    print(f"{n:6s}{TRUTH[n]:9.2f}{med[n]:12.2f}      [{ci[n][0]:8.2f}, {ci[n][1]:8.2f}]")
+
+# %% [markdown]
+# ## Next steps on real data
+#
+# - **Real stars**: replace the mock block with catalog magnitudes (DELVE/Gaia
+#   cross-match) and per-band errors; add SFD dereddening (0.65 × E(B−V)) via
+#   per-filter reddening coefficients (`StarModel(extinction_coeffs=...)`).
+# - **Convention audit**: recompute a few grid magnitudes from raw TSLTE spectra
+#   through tengri's filter integration (photon-counting 1/λ default) and compare
+#   against the FITS values before mixing this grid with other filter sets.
+# - **`averaged` flag**: confirm semantics with Ani — the loader currently
+#   prefers `averaged=True` rows when nodes are duplicated.
