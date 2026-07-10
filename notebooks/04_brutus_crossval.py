@@ -39,6 +39,7 @@ import os
 # JAX's XLA and numba's default OpenMP threading layer both load libomp —
 # a duplicate-runtime segfault on macOS. numba's workqueue layer avoids libomp.
 os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # silence XLA/PJRT C++ chatter
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import time
