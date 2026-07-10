@@ -35,8 +35,10 @@ dependencies = [
     # Pinned to a tengri main SHA; bump deliberately (see README "Working with tengri").
     "astro-tengri @ git+https://github.com/suchethac/tengri.git@c407bb3b6196c7b0648896464a7a917173646056",
     "astropy>=5.3",
+    "blackjax>=1.0",  # fit_nuts / fit_hmc / make_hmc_pipeline
     "jax>=0.4.20",
     "numpy>=1.24",
+    "scipy>=1.10",  # fit_map (L-BFGS-B)
 ]
 
 [project.urls]
