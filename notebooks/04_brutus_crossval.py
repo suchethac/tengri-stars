@@ -216,28 +216,82 @@ for k, tv in zip(shared, truth_vec):
     )
 
 # %% [markdown]
-# ## Reading the comparison (observed on this mock)
+# ## 6. Is brutus's tightness real? Diagnostics
 #
-# - **The dwarf/giant degeneracy is the headline.** ugri colors alone barely
-#   separate a metal-poor giant from a dwarf, and with no parallax the two codes
-#   resolve the bimodality by prior: brutus's IMF + Galactic priors (dwarfs
-#   heavily outnumber giants) collapse its posterior onto a *dwarf* solution —
-#   log g = 4.72 ± 0.03, confidently excluding the true 2.0 — while tengri-stars'
-#   flat prior settles on the giant side (0.85, 68% [−0.1, 1.8]) with honest
-#   width. Both Teff medians ride the Teff–log g ridge ~180 K above truth. The
-#   cures, in order of power: parallax (kills the dwarf solution outright), a
-#   gravity-sensitive band, or — Bayesianly cleanest — running NSS once per
-#   log g class and comparing evidences (Δlog Z), the model-comparison upgrade of
-#   MAGIC's parallax z-score classification.
-# - **[Fe/H] separates cleanly**: tengri-stars, fitting the generating grid,
-#   recovers −1.54 (truth −1.5); brutus lands +0.3 dex metal-rich at −1.20
-#   [−1.25, −0.95] — the C3K↔Turbospectrum u-band synthetic-photometry
-#   systematic (compounded by its dwarf solution). Per-band zero-point offsets
-#   are the standard remedy — brutus itself ships per-survey offset files — and
-#   this is exactly the calibration MAGIC-scale surveys need.
-# - tengri-stars carries no model mismatch by construction here; that's the
-#   point of the design — brutus's residuals bundle its priors *and* the grid
-#   physics differences, and this notebook measures the bundle.
+# BruteForce is an exhaustive scan, so it cannot "fail to converge" — but a
+# posterior can still be untrustworthy three ways: **misspecification collapse**
+# (no model fits, so likelihood ratios between the least-bad island and
+# everything else explode), **weight culling** (`wt_thresh=1e-3` deletes
+# subdominant modes), and **quantization** (equal-weight draws recycling a
+# handful of grid models). All three are checkable.
+
+# %%
+with h5py.File(DATA / "brutus" / "tslte_mock_fit.h5", "r") as f:
+    chi2min = float(f["obj_chi2min"][0])
+    n_unique = int(np.unique(f["model_idx"][0]).size)
+print(f"chi2min = {chi2min:.1f} over {len(BRUTUS_BANDS)} bands — no model fits: the")
+print("TSLTE↔C3K systematic is ~0.06 mag RMS against 0.02 mag error bars.")
+print(f"unique models behind the 1000 draws: {n_unique} — heavily quantized.")
+
+# %% [markdown]
+# The honest refit inflates the errors to absorb the grid systematic
+# (σ_eff = 0.07 mag → expected χ²_min ≈ n_bands) and lowers the culling
+# threshold so subdominant modes survive.
+
+# %%
+flux_r, ferr_r = brutus_utils.inv_magnitude(mags_obs, np.full(len(BRUTUS_BANDS), 0.07))
+bf.fit(
+    flux_r[None, :],
+    ferr_r[None, :],
+    np.ones((1, len(BRUTUS_BANDS)), dtype=bool),
+    np.array([0]),
+    str(DATA / "brutus" / "tslte_mock_relaxed"),
+    data_coords=np.array([[90.0, 60.0]]),
+    av_gauss=(0.0, 0.01),
+    Ndraws=2500,
+    wt_thresh=1e-6,
+    rstate=np.random.RandomState(4),
+    verbose=False,
+)
+with h5py.File(DATA / "brutus" / "tslte_mock_relaxed.h5", "r") as f:
+    idx_r = f["model_idx"][0]
+    chi2_r = float(f["obj_chi2min"][0])
+relaxed = {
+    "teff": 10.0 ** labels["logt"][idx_r],
+    "logg": labels["logg"][idx_r],
+    "feh": labels["feh"][idx_r],
+}
+print(f"relaxed: chi2min = {chi2_r:.1f} (genuine fit), unique models = {np.unique(idx_r).size}")
+for k, tv in zip(shared, truth_vec):
+    q = np.percentile(np.asarray(relaxed[k], dtype=float), [2.5, 50, 97.5])
+    print(f"  {k:5s} truth {tv:8.2f}: median {q[1]:8.2f}, 95% [{q[0]:7.2f}, {q[2]:7.2f}]")
+print(f"  giant-branch mass (logg < 3.5): {float(np.mean(relaxed['logg'] < 3.5)):.1%}")
+
+# %% [markdown]
+# ## Reading the comparison (with diagnostics in hand)
+#
+# The strict-error brutus posterior in §5 is **false-precision**: χ²_min = 82
+# over 8 bands means no MIST/C3K model reproduces the Turbospectrum photometry
+# at σ = 0.02 mag (the grids differ by ~0.06 mag RMS in these bands), so the
+# posterior collapsed onto the least-bad island — 31 grid models masquerading as
+# a ±0.03 dex log g measurement. Two separate conclusions survive the refit:
+#
+# - **The dwarf preference is genuinely prior-driven.** With errors that admit
+#   the systematic (χ²_min ≈ 7) and no weight culling, the giant branch *still*
+#   receives ~0% of brutus's posterior mass: absent a parallax, the IMF +
+#   Galactic priors overwhelm colors that permit both solutions. tengri-stars'
+#   flat prior sits on the giant side instead. The cures, in order of power:
+#   parallax, a gravity-sensitive band, or per-class evidence comparison
+#   (Δlog Z from NSS — the Bayesian upgrade of MAGIC's parallax z-score).
+# - **The [Fe/H] offset was partly artifact**: the relaxed brutus 95% interval
+#   ([−1.8, −0.1]) covers the truth it previously excluded. What remains is a
+#   metal-rich *lean* from the C3K↔Turbospectrum u-band difference — the
+#   per-band zero-point calibration MAGIC-scale surveys need (brutus itself
+#   ships per-survey offset files for exactly this reason).
+# - **Methodological moral**: a tight posterior from a grid code is only as
+#   trustworthy as its χ²_min. tengri-stars fits carry no mismatch here by
+#   construction (the mock came from the fitted grid); on real stars both codes
+#   face this, and the χ²_min check belongs in every pipeline.
 # - The spectroscopic channel (notebook 01) is untouched by all of this: these
 #   are photometric-grid systematics only. TSLTE synthetic *spectra* grids, when
 #   available, slot into `SpectralGrid.from_arrays` for the joint fit.
