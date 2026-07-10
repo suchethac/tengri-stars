@@ -31,6 +31,10 @@
 # is unchanged.
 
 # %%
+import os
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # silence XLA/PJRT C++ chatter
+
 import time
 
 import corner

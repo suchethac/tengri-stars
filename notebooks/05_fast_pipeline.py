@@ -32,6 +32,10 @@
 # mass-matrix adaptation handles the parameter scales.
 
 # %%
+import os
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # silence XLA/PJRT C++ chatter
+
 import time
 from pathlib import Path
 
@@ -88,6 +92,44 @@ mags_obs = jnp.asarray(
     np.asarray(model.predict_mags(**truth)) + rng.normal(0.0, SIG_MAG, len(grid.filter_names))
 )
 
+# %% [markdown]
+# ### The arithmetic first: microseconds per evaluation × evaluations per posterior
+#
+# A single grid-lookup likelihood *is* microseconds. A posterior is not one
+# evaluation: HMC below does (500 warmup + 1000 samples) × 32 leapfrog steps
+# = 48,000 *gradient* evaluations (each ~2–3× a forward call). Multiply it out
+# and the sampler is compute-bound, not overhead-bound.
+
+# %%
+single_eval = jax.jit(lambda p: loglikelihood(p, mags_obs))
+p_example = {"teff": 4600.0, "logg": 2.0, "feh": -1.5, "mu": -18.0}
+_ = jax.block_until_ready(single_eval(p_example))  # compile
+
+# Keep the vmap batch small: the separable interpolation materializes a
+# (batch, n_logg, n_feh, n_filters) intermediate, so a 100k-wide vmap would
+# allocate ~26 GB on this grid. 2k × 10 repeats measures the same number.
+N_EVAL = 2_000
+p_batch = {
+    "teff": np.random.uniform(4000, 6500, N_EVAL),
+    "logg": np.random.uniform(0.5, 4.5, N_EVAL),
+    "feh": np.random.uniform(-3.5, -0.5, N_EVAL),
+    "mu": np.random.uniform(-20, -16, N_EVAL),
+}
+batch_eval = jax.jit(jax.vmap(lambda p: loglikelihood(p, mags_obs)))
+_ = jax.block_until_ready(batch_eval(p_batch))  # compile
+t0 = time.time()
+for _rep in range(10):
+    _ = jax.block_until_ready(batch_eval(p_batch))
+per_eval_us = (time.time() - t0) / (10 * N_EVAL) * 1e6
+
+n_grad_evals = (500 + 1000) * 32
+print(f"single likelihood evaluation: {per_eval_us:.1f} µs (amortized, vmapped)")
+print(
+    f"HMC posterior = {n_grad_evals:,} gradient evals × ~2.5 × {per_eval_us:.1f} µs"
+    f" ≈ {n_grad_evals * 2.5 * per_eval_us / 1e6:.1f} s predicted"
+)
+
+# %%
 t0 = time.time()
 samples, info = jax.block_until_ready(pipeline(jax.random.PRNGKey(0), mags_obs))
 t_cold = time.time() - t0
@@ -145,7 +187,7 @@ print(f"  warm:           {t_cat_warm:6.1f} s  →  {t_cat_warm / N_STARS * 1000
 print(f"  median acceptance: {float(jnp.median(cat_info['acceptance_rate'])):.2f}")
 
 # %% [markdown]
-# ## 4. Catalog recovery — the MAGIC-style validation plot
+# ## 4. Catalog recovery
 
 # %%
 feh_med = np.median(np.asarray(cat_samples["feh"]), axis=1)
@@ -223,6 +265,63 @@ fig.legend(
     frameon=False,
 )
 plt.show()
+
+# %% [markdown]
+# ## 6. Jitted NSS: the whole nested run in one graph too
+#
+# `fit_nss` drives the sampler from a Python loop that pulls the evidence
+# stopping criterion to the host every iteration — hundreds of device
+# round-trips per star. `make_nss_pipeline` moves the loop into
+# `lax.while_loop` (criterion evaluated on-device, dead particles scattered
+# into a preallocated buffer): one graph, one launch, vmap-able core.
+
+# %%
+from tengri_stars import make_nss_pipeline
+
+nss_pipe = make_nss_pipeline(loglikelihood, priors, n_live=400, num_delete=40)
+
+t0 = time.time()
+s_nss, i_nss = nss_pipe(jax.random.PRNGKey(6), mags_obs)
+t_nss_cold = time.time() - t0
+t0 = time.time()
+s_nss, i_nss = nss_pipe(jax.random.PRNGKey(7), mags_obs)
+t_nss_warm = time.time() - t0
+
+print(f"jitted NSS cold (compile): {t_nss_cold:5.1f} s")
+print(f"jitted NSS warm:           {t_nss_warm:5.2f} s/star")
+print(
+    f"  log Z = {i_nss['logz']:.1f} (python-loop fit_nss gave {nss.logz:.1f}), "
+    f"ESS = {i_nss['ess']:.0f}, {i_nss['n_iterations']} iterations"
+)
+
+# %% [markdown]
+# Catalog NSS on CPU: reuse the one compiled core sequentially. (`jax.vmap` of
+# `nss_pipe.run` also works and is the GPU story — but the slice-sampler's XLA
+# graph is large, and the vmapped compile ballooned past 10 GB RSS on this
+# machine; a 10 GB OOM watchdog killed it. Sequential reuse of the jitted core
+# is the honest CPU pattern.)
+
+# %%
+N_NSS = 10
+keys_nss = jax.random.split(jax.random.PRNGKey(8), N_NSS)
+t0 = time.time()
+logzs = [nss_pipe(keys_nss[i], mags_batch[i])[1]["logz"] for i in range(N_NSS)]
+t_nss_cat = time.time() - t0
+print(
+    f"sequential jitted NSS over {N_NSS} stars: {t_nss_cat:.1f} s → {t_nss_cat / N_NSS:.2f} s/star"
+)
+
+# %% [markdown]
+# ## 7. Timing summary
+
+# %%
+print("timing summary (this machine, CPU):")
+print(f"  single likelihood evaluation   {per_eval_us:8.1f} µs")
+print(f"  HMC pipeline, single star      {t_warm:8.2f} s")
+print(f"  HMC pipeline, catalog vmap     {t_cat_warm / N_STARS:8.2f} s/star")
+print(f"  jitted NSS, single star        {t_nss_warm:8.2f} s")
+print(f"  jitted NSS, catalog (seq.)     {t_nss_cat / N_NSS:8.2f} s/star")
+print(f"  python-loop NSS (fit_nss)      {t_nss:8.2f} s")
 
 # %% [markdown]
 # ## When to use which
