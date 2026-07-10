@@ -27,8 +27,30 @@ from tengri.inference.backends.nested.nss import as_top_level_api
 from tengri.inference.backends.nested.utils import ess as ns_ess, sample as ns_sample
 
 
+class _PosteriorSummary:
+    """Shared posterior-summary methods; expects a ``samples`` dict attribute."""
+
+    def median(self) -> dict[str, float]:
+        """Posterior medians per parameter."""
+        return {k: float(jnp.median(v)) for k, v in self.samples.items()}
+
+    def interval(self, q: float = 0.68) -> dict[str, tuple[float, float]]:
+        """Central credible interval per parameter.
+
+        Parameters
+        ----------
+        q : float
+            Central probability mass, e.g. 0.68.
+        """
+        lo, hi = 50.0 * (1.0 - q), 50.0 * (1.0 + q)
+        return {
+            k: (float(jnp.percentile(v, lo)), float(jnp.percentile(v, hi)))
+            for k, v in self.samples.items()
+        }
+
+
 @dataclass(frozen=True)
-class NSSResult:
+class NSSResult(_PosteriorSummary):
     """Nested-sampling posterior for one star.
 
     Parameters
@@ -51,23 +73,27 @@ class NSSResult:
     n_iterations: int
     wall_time: float
 
-    def median(self) -> dict[str, float]:
-        """Posterior medians per parameter."""
-        return {k: float(jnp.median(v)) for k, v in self.samples.items()}
 
-    def interval(self, q: float = 0.68) -> dict[str, tuple[float, float]]:
-        """Central credible interval per parameter.
+@dataclass(frozen=True)
+class NUTSResult(_PosteriorSummary):
+    """NUTS (blackjax) posterior for one star.
 
-        Parameters
-        ----------
-        q : float
-            Central probability mass, e.g. 0.68.
-        """
-        lo, hi = 50.0 * (1.0 - q), 50.0 * (1.0 + q)
-        return {
-            k: (float(jnp.percentile(v, lo)), float(jnp.percentile(v, hi)))
-            for k, v in self.samples.items()
-        }
+    Parameters
+    ----------
+    samples : dict of str -> jnp.ndarray, shape (num_samples,)
+        Posterior samples per parameter, physical units.
+    acceptance_rate : float
+        Mean warmup-tuned acceptance rate.
+    num_divergent : int
+        Number of divergent transitions in the sampling phase.
+    wall_time : float
+        Sampling wall-clock time [s], including JIT compilation.
+    """
+
+    samples: dict[str, jnp.ndarray]
+    acceptance_rate: float
+    num_divergent: int
+    wall_time: float
 
 
 def fit_nss(
@@ -183,5 +209,80 @@ def fit_nss(
         logz=logz,
         ess=ess_val,
         n_iterations=n_iter,
+        wall_time=wall_time,
+    )
+
+
+def fit_nuts(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    key,
+    num_warmup: int = 1000,
+    num_samples: int = 1000,
+) -> NUTSResult:
+    """Sample a star posterior with blackjax NUTS in unbounded ξ-space.
+
+    Each parameter is mapped through its prior's ``unstandardize`` (standard
+    normal ξ → bounded physical value), and the target is the information
+    Hamiltonian ``log L(h(ξ)) - ξᵀξ/2`` — tengri's convention. The bounded
+    transform is load-bearing for grid-lookup models: the clamped LUT has zero
+    gradient outside the grid hull, where an unbounded sampler would strand.
+
+    Prefer :func:`fit_nss` when the posterior may be multimodal (dwarf/giant
+    degeneracies) or the evidence is needed; prefer NUTS for higher-dimensional
+    unimodal joint fits, with the C²-smooth triweight interpolation
+    (``interp_method='triweight'``) for well-behaved gradients.
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict[str, scalar]) -> scalar`` log-likelihood, JAX-traceable
+        and differentiable.
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors; each must expose ``unstandardize(xi)``
+        (e.g. :class:`tengri.Uniform`).
+    key : jax.random.PRNGKey
+        Random key for warmup and sampling.
+    num_warmup : int
+        Window-adaptation steps (step size + mass matrix).
+    num_samples : int
+        Posterior draws after warmup.
+
+    Returns
+    -------
+    NUTSResult
+    """
+    import blackjax
+
+    names = tuple(priors)
+
+    def to_physical(xi):
+        return {name: priors[name].unstandardize(xi[name]) for name in names}
+
+    def logdensity(xi):
+        prior_term = -0.5 * jnp.sum(jnp.stack([xi[name] ** 2 for name in names]))
+        return loglikelihood_fn(to_physical(xi)) + prior_term
+
+    t0 = time.time()
+    key, warmup_key, sample_key = jax.random.split(key, 3)
+    xi0 = {name: jnp.asarray(0.0) for name in names}
+    warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
+    (state, tuned), _ = warmup.run(warmup_key, xi0, num_steps=num_warmup)
+    kernel = blackjax.nuts(logdensity, **tuned).step
+
+    def one_step(state, step_key):
+        state, info = kernel(step_key, state)
+        return state, (state.position, info.acceptance_rate, info.is_divergent)
+
+    _, (positions, acceptance, divergent) = jax.lax.scan(
+        one_step, state, jax.random.split(sample_key, num_samples)
+    )
+    wall_time = time.time() - t0
+
+    return NUTSResult(
+        samples={name: priors[name].unstandardize(positions[name]) for name in names},
+        acceptance_rate=float(jnp.mean(acceptance)),
+        num_divergent=int(jnp.sum(divergent)),
         wall_time=wall_time,
     )
