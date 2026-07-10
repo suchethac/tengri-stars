@@ -49,6 +49,10 @@ dev = [
     "pytest-timeout>=2.1",
     "ruff>=0.4",
 ]
+crossval = [
+    "astro-brutus>=1.1",  # notebooks/03_brutus_crossval.py
+    "corner>=2.2",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
