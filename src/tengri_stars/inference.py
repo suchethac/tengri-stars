@@ -382,6 +382,140 @@ def fit_map(
     )
 
 
+def make_nss_pipeline(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    n_live: int = 400,
+    num_delete: int = 40,
+    num_inner_steps: int | None = None,
+    max_iterations: int = 500,
+    log_evidence_tol: float = -3.0,
+    n_posterior_samples: int = 2000,
+    max_steps: int = 10,
+    max_shrinkage: int = 20,
+) -> Callable:
+    """Compile the *entire* NSS run into one XLA graph: data in → posterior out.
+
+    :func:`fit_nss` drives tengri's sampler from a Python loop that pulls the
+    evidence stopping criterion back to the host every iteration (~hundreds of
+    device round-trips per star). Here the loop is a ``jax.lax.while_loop``
+    with the criterion evaluated on-device and dead particles scattered into a
+    preallocated ``(max_iterations, num_delete, ...)`` buffer — one graph, one
+    launch, and the raw core (``pipeline.run``) ``jax.vmap``s over a catalog.
+
+    Note the floor this cannot beat: a nested-sampling posterior costs
+    ~10⁵ likelihood evaluations; at ~30 µs per grid lookup the compute itself
+    is a few seconds on CPU. Killing host syncs removes the *overhead* on top;
+    the remaining lever is hardware (the vmapped core on GPU) or cheaper
+    sampler settings.
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict, data) -> scalar``, JAX-traceable.
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors exposing ``sample(key)`` and ``log_prob(x)``.
+    n_live, num_delete, num_inner_steps, log_evidence_tol, max_steps, max_shrinkage
+        As in :func:`fit_nss`.
+    max_iterations : int
+        Static bound on NS iterations — sizes the dead-particle buffer
+        (memory ≈ ``max_iterations × num_delete × n_params`` doubles).
+    n_posterior_samples : int
+        Equal-weight posterior draws returned by the host wrapper.
+
+    Returns
+    -------
+    callable
+        ``pipeline(key, data) -> (samples, info)`` with ``info`` carrying
+        ``logz``, ``ess``, ``n_iterations``, ``wall_time``. The jitted core is
+        exposed as ``pipeline.run`` — ``(key, data) -> (dead_buffer, live,
+        n_iterations, logz)`` — for ``jax.vmap`` catalog runs (resample each
+        star on the host afterwards; that part is milliseconds).
+    """
+    names = tuple(priors)
+    dim = len(names)
+    if num_inner_steps is None:
+        num_inner_steps = dim
+
+    def logprior_fn(params):
+        return jnp.sum(jnp.stack([priors[name].log_prob(params[name]) for name in names]))
+
+    def _algo(data):
+        return as_top_level_api(
+            logprior_fn,
+            lambda p: loglikelihood_fn(p, data),
+            num_inner_steps,
+            num_delete=num_delete,
+            max_steps=max_steps,
+            max_shrinkage=max_shrinkage,
+        )
+
+    def _run(key, data):
+        key, init_key = jax.random.split(key)
+        particles = {
+            name: jax.vmap(priors[name].sample)(
+                jax.random.split(jax.random.fold_in(init_key, i), n_live)
+            )
+            for i, name in enumerate(names)
+        }
+        algo = _algo(data)
+        live0 = algo.init(particles)
+
+        dead_template = jax.eval_shape(lambda k, s: algo.step(k, s)[1].particles, key, live0)
+        buffer0 = jax.tree_util.tree_map(
+            lambda sd: jnp.zeros((max_iterations, *sd.shape), sd.dtype), dead_template
+        )
+
+        def cond(carry):
+            _key, live, _buf, i = carry
+            remaining = live.integrator.logZ_live - live.integrator.logZ
+            return jnp.logical_and(remaining >= log_evidence_tol, i < max_iterations)
+
+        def body(carry):
+            key, live, buf, i = carry
+            key, step_key = jax.random.split(key)
+            live, dead = algo.step(step_key, live)
+            buf = jax.tree_util.tree_map(lambda b, d: b.at[i].set(d), buf, dead.particles)
+            return (key, live, buf, i + 1)
+
+        _key, live, buf, n_iter = jax.lax.while_loop(
+            cond, body, (key, live0, buffer0, jnp.asarray(0))
+        )
+        logz = jnp.logaddexp(live.integrator.logZ, live.integrator.logZ_live)
+        return buf, live, n_iter, logz
+
+    run = jax.jit(_run)
+
+    def pipeline(key, data):
+        t0 = time.time()
+        run_key, sample_key, ess_key = jax.random.split(key, 3)
+        buf, live, n_iter, logz = jax.block_until_ready(run(run_key, jnp.asarray(data)))
+        n = int(n_iter)
+        dead_flat = jax.tree_util.tree_map(
+            lambda x: x[:n].reshape((n * num_delete, *x.shape[2:])), buf
+        )
+        final = jax.tree_util.tree_map(
+            lambda d, live_leaf: jnp.concatenate([d, live_leaf], axis=0),
+            dead_flat,
+            live.particles,
+        )
+        ns_run = NSInfo(final, None)
+        resampled = ns_sample(sample_key, ns_run, n_posterior_samples)
+        ess_val = float(ns_ess(ess_key, ns_run))
+        samples = {name: resampled.position[name] for name in names}
+        info = {
+            "logz": float(logz),
+            "ess": ess_val,
+            "n_iterations": n,
+            "wall_time": time.time() - t0,
+        }
+        return samples, info
+
+    pipeline.run = run
+    return pipeline
+
+
 def _run_blackjax(
     algo_name: str,
     algo_kwargs: dict,

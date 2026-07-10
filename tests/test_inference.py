@@ -6,7 +6,15 @@ import numpy as np
 from astropy.table import Table
 from tengri import Uniform
 
-from tengri_stars import StarModel, fit_hmc, fit_map, fit_nss, fit_nuts, make_hmc_pipeline
+from tengri_stars import (
+    StarModel,
+    fit_hmc,
+    fit_map,
+    fit_nss,
+    fit_nuts,
+    make_hmc_pipeline,
+    make_nss_pipeline,
+)
 from tengri_stars.grids import load_photometry_grid
 
 COEFFS = {
@@ -130,6 +138,45 @@ def test_jitted_hmc_pipeline_single_star_and_vmap_batch():
     bsamples, _binfo = jax.vmap(pipeline)(keys, batch)
     assert bsamples["teff"].shape == (3, 1500)
     assert np.all(np.isfinite(np.asarray(bsamples["feh"])))
+
+
+def test_jitted_nss_pipeline_matches_fit_nss():
+    """Whole-graph NSS (lax.while_loop) agrees with the Python-loop driver."""
+    model, truth, sigma, mags_obs, priors, _key = _mock_setup()
+
+    def loglikelihood(p, data):
+        pred = model.predict_mags(teff=p["teff"], logg=p["logg"], feh=p["feh"], mu=p["mu"])
+        return -0.5 * jnp.sum(((pred - data) / sigma) ** 2)
+
+    pipeline = make_nss_pipeline(loglikelihood, priors, n_live=200, num_delete=20)
+    samples, info = pipeline(jax.random.PRNGKey(11), mags_obs)
+
+    assert np.isfinite(info["logz"])
+    assert int(info["n_iterations"]) > 5
+    _assert_covers_truth(samples, truth)
+
+    ref = fit_nss(
+        loglikelihood,
+        priors,
+        key=jax.random.PRNGKey(11),
+        data=mags_obs,
+        n_live=200,
+        num_delete=20,
+    )
+    # Same algorithm, same settings: evidence and medians must agree closely.
+    assert abs(info["logz"] - ref.logz) < 1.5
+    for name in truth:
+        med_pipe = float(jnp.median(samples[name]))
+        med_ref = float(jnp.median(ref.samples[name]))
+        width = float(np.std(np.asarray(ref.samples[name])))
+        assert abs(med_pipe - med_ref) < max(0.5 * width, 1e-3), name
+
+    # Raw jitted core vmaps over stars for catalog mode.
+    batch = jnp.stack([mags_obs, mags_obs])
+    keys = jax.random.split(jax.random.PRNGKey(12), 2)
+    _dead, _live, _n_iter, logz = jax.vmap(pipeline.run)(keys, batch)
+    assert logz.shape == (2,)
+    assert np.all(np.isfinite(np.asarray(logz)))
 
 
 def test_nss_recovers_mock_star_with_calibrated_posterior():

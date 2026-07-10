@@ -10,6 +10,7 @@ from tengri_stars.inference import (
     fit_nss,
     fit_nuts,
     make_hmc_pipeline,
+    make_nss_pipeline,
 )
 from tengri_stars.model import StarModel
 
@@ -27,4 +28,5 @@ __all__ = [
     "fit_nuts",
     "load_photometry_grid",
     "make_hmc_pipeline",
+    "make_nss_pipeline",
 ]
