@@ -29,6 +29,12 @@
 
 # %%
 import time
+from pathlib import Path
+
+# Notebook kernels launch in notebooks/; scripts run from the repo root.
+DATA = (
+    Path("data") if (Path("data") / "TSLTE_combined_photometry.fits").exists() else Path("../data")
+)
 
 import corner
 import jax
@@ -42,7 +48,7 @@ from tengri_stars import StarModel, fit_nss, fit_nuts, load_photometry_grid
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(17)
 
-GRID_PATH = "data/TSLTE_combined_photometry.fits"
+GRID_PATH = DATA / "TSLTE_combined_photometry.fits"
 
 # %% [markdown]
 # ## 1. Load the grid
