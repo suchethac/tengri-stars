@@ -50,7 +50,6 @@ DATA = (
     Path("data") if (Path("data") / "TSLTE_combined_photometry.fits").exists() else Path("../data")
 )
 
-import corner
 import h5py
 import jax
 import jax.numpy as jnp
@@ -63,7 +62,7 @@ from brutus.data.download import fetch_grids
 from brutus.data.loader import load_models
 from tengri import Uniform
 
-from tengri_stars import StarModel, fit_nss, load_photometry_grid
+from tengri_stars import StarModel, fit_nss, load_photometry_grid, overlay_corner
 
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(9)
@@ -176,33 +175,16 @@ shared = ["teff", "logg", "feh"]
 labels_tex = [r"$T_{\rm eff}$ [K]", r"$\log g$", "[Fe/H]"]
 truth_vec = [TRUTH["teff"], TRUTH["logg"], TRUTH["feh"]]
 
-b_stack = np.column_stack([np.asarray(brutus_samples[k], dtype=float) for k in shared])
-t_stack = np.column_stack([np.asarray(ts.samples[k]) for k in shared])
-
-fig = corner.corner(
-    t_stack,
+fig = overlay_corner(
+    [ts.samples, brutus_samples],
+    names=shared,
     labels=labels_tex,
-    truths=truth_vec,
-    color="C0",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-corner.corner(
-    b_stack,
-    fig=fig,
-    color="C2",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-fig.legend(
-    handles=[
-        plt.Line2D([], [], color="C0", label="tengri-stars (NSS on the TSLTE grid)"),
-        plt.Line2D([], [], color="C2", label="brutus (MIST v9 + priors, C3K photometry)"),
+    colors=["C0", "C2"],
+    legend_labels=[
+        "tengri-stars (NSS on the TSLTE grid)",
+        "brutus (MIST v9 + priors, C3K photometry)",
     ],
-    loc="upper right",
-    frameon=False,
+    truths={k: v for k, v in TRUTH.items() if k in shared},
 )
 plt.show()
 

@@ -40,14 +40,13 @@ DATA = (
     Path("data") if (Path("data") / "TSLTE_combined_photometry.fits").exists() else Path("../data")
 )
 
-import corner
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from tengri import Uniform
 
-from tengri_stars import StarModel, fit_nss, fit_nuts, load_photometry_grid
+from tengri_stars import StarModel, fit_nss, fit_nuts, load_photometry_grid, overlay_corner
 
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(17)
@@ -163,33 +162,13 @@ names = list(priors)
 labels_tex = [r"$T_{\rm eff}$ [K]", r"$\log g$", "[Fe/H]", r"$\mu$"]
 truth_vec = [TRUTH[n] for n in names]
 
-nss_stack = np.column_stack([np.asarray(nss.samples[n]) for n in names])
-nuts_stack = np.column_stack([np.asarray(nuts.samples[n]) for n in names])
-
-fig = corner.corner(
-    nss_stack,
+fig = overlay_corner(
+    [nss.samples, nuts.samples],
+    names=names,
     labels=labels_tex,
-    truths=truth_vec,
-    color="C0",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-corner.corner(
-    nuts_stack,
-    fig=fig,
-    color="C1",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-fig.legend(
-    handles=[
-        plt.Line2D([], [], color="C0", label=f"NSS ({nss.wall_time:.0f} s)"),
-        plt.Line2D([], [], color="C1", label=f"NUTS ({nuts.wall_time:.0f} s)"),
-    ],
-    loc="upper right",
-    frameon=False,
+    colors=["C0", "C1"],
+    legend_labels=[f"NSS ({nss.wall_time:.0f} s)", f"NUTS ({nuts.wall_time:.0f} s)"],
+    truths=TRUTH,
 )
 plt.show()
 
