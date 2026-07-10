@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Synthetic grids and survey data are never committed
+data/
+*.fits
+*.h5
+*.hdf5
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

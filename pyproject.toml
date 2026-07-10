@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tengri-stars"
+version = "0.0.1"
+description = "Differentiable stellar-parameter inference (Teff, logg, [Fe/H]) from photometry and spectra, built on the tengri SED-fitting stack"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "BSD-3-Clause"}
+authors = [
+    {name = "Suchetha Cooray", email = "astro.tengri@gmail.com"},
+    {name = "Ani Chiti"},
+]
+keywords = [
+    "stellar-parameters",
+    "metallicity",
+    "photometry",
+    "gaia",
+    "lsst",
+    "jax",
+    "bayesian-inference",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    # Pinned to a tengri main SHA; bump deliberately (see README "Working with tengri").
+    "astro-tengri @ git+https://github.com/suchethac/tengri.git@c407bb3b6196c7b0648896464a7a917173646056",
+    "astropy>=5.3",
+    "jax>=0.4.20",
+    "numpy>=1.24",
+]
+
+[project.urls]
+Repository = "https://github.com/suchethac/tengri-stars"
+Issues = "https://github.com/suchethac/tengri-stars/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.1",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 99
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "F",      # pyflakes — unused imports/vars, redefined names
+    "E", "W", # pycodestyle — basic style
+    "I",      # isort — import sorting
+    "UP",     # pyupgrade — modernize syntax to 3.10+
+    "B",      # flake8-bugbear — common bug patterns
+    "SIM",    # flake8-simplify — simplifiable constructs
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "E402",   # module-import-not-at-top — needed for jax.config before imports
+    "E741",   # ambiguous-variable-name — scientific code uses l, I, O
+    "B905",   # zip-without-explicit-strict — not needed for JAX array ops
+    "SIM108", # use-ternary-operator — readability over brevity in science code
+    "RUF001", # ambiguous-unicode-character-string — Greek letters in math strings
+    "RUF002", # ambiguous-unicode-character-docstring — σ, ξ, θ in docstrings
+    "RUF003", # ambiguous-unicode-character-comment — scientific notation in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # re-exports are intentional
+"tests/**" = ["F841"]     # unused variables common in test fixtures
+
+[tool.ruff.lint.isort]
+known-first-party = ["tengri_stars"]
+combine-as-imports = true
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+timeout = 300
