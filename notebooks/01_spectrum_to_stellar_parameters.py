@@ -39,7 +39,6 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from tengri import Uniform
-from tengri.utils.physics_constants import C_KM_S
 
 from tengri_stars import SpectralGrid, StarModel, fit_nss
 
@@ -152,7 +151,9 @@ def loglikelihood(p):
 t0 = time.time()
 result = fit_nss(loglikelihood, priors, key=jax.random.PRNGKey(7), n_live=400, num_delete=40)
 print(f"total wall time (incl. JIT compile): {time.time() - t0:.1f} s")
-print(f"NSS iterations: {result.n_iterations},  log Z = {result.logz:.1f},  ESS = {result.ess:.0f}")
+print(
+    f"NSS iterations: {result.n_iterations},  log Z = {result.logz:.1f},  ESS = {result.ess:.0f}"
+)
 
 # %% [markdown]
 # ## 4. Posteriors
@@ -184,16 +185,14 @@ for n in names:
 # this is tengri's filter-integration pipeline over LSST/DES/CaHK curves.
 
 # %%
-from tengri_stars import PhotometryGrid  # noqa: E402
-from tengri.utils import edges_for_grid  # noqa: E402
+from tengri.utils import edges_for_grid
+
+from tengri_stars import PhotometryGrid
 
 BANDS = {"b_box": (4600.0, 4900.0), "v_box": (5000.0, 5300.0)}
 phot = np.stack(
     [
-        -2.5
-        * np.log10(
-            np.asarray(grid.flux[..., (WAVE >= lo) & (WAVE <= hi)]).mean(axis=-1)
-        )
+        -2.5 * np.log10(np.asarray(grid.flux[..., (lo <= WAVE) & (hi >= WAVE)]).mean(axis=-1))
         for lo, hi in BANDS.values()
     ],
     axis=-1,
@@ -222,10 +221,18 @@ def joint_loglikelihood(p):
 
 
 t0 = time.time()
-joint = fit_nss(joint_loglikelihood, joint_priors, key=jax.random.PRNGKey(11), n_live=400, num_delete=40)
-print(f"joint fit wall time: {time.time() - t0:.1f} s,  log Z = {joint.logz:.1f}, ESS = {joint.ess:.0f}")
+joint = fit_nss(
+    joint_loglikelihood, joint_priors, key=jax.random.PRNGKey(11), n_live=400, num_delete=40
+)
+print(
+    f"joint fit wall time: {time.time() - t0:.1f} s,  "
+    f"log Z = {joint.logz:.1f}, ESS = {joint.ess:.0f}"
+)
 jm, jci = joint.median(), joint.interval(0.68)
-print(f"mu       : {jm['mu']:9.2f}  68% [{jci['mu'][0]:9.2f}, {jci['mu'][1]:9.2f}]   truth {mu_true:9.2f}")
+print(
+    f"mu       : {jm['mu']:9.2f}  "
+    f"68% [{jci['mu'][0]:9.2f}, {jci['mu'][1]:9.2f}]   truth {mu_true:9.2f}"
+)
 
 # %% [markdown]
 # ## 6. The same fit with NUTS (blackjax)
@@ -237,7 +244,7 @@ print(f"mu       : {jm['mu']:9.2f}  68% [{jci['mu'][0]:9.2f}, {jci['mu'][1]:9.2f
 # switch `interp_method='triweight'` for C² if adaptation ever struggles.
 
 # %%
-from tengri_stars import fit_nuts  # noqa: E402
+from tengri_stars import fit_nuts
 
 t0 = time.time()
 nuts = fit_nuts(loglikelihood, priors, key=jax.random.PRNGKey(5), num_warmup=800, num_samples=1500)
@@ -263,19 +270,31 @@ nuts_stack = np.column_stack([np.asarray(nuts.samples[n]) for n in names])
 truth_vec = [TRUTH[n] for n in names]
 
 fig = corner.corner(
-    stack, labels=labels, truths=truth_vec, color="C0",
-    hist_kwargs={"density": True}, plot_datapoints=False, smooth=1.0,
+    stack,
+    labels=labels,
+    truths=truth_vec,
+    color="C0",
+    hist_kwargs={"density": True},
+    plot_datapoints=False,
+    smooth=1.0,
 )
 corner.corner(
-    nuts_stack, fig=fig, color="C1",
-    hist_kwargs={"density": True}, plot_datapoints=False, smooth=1.0,
+    nuts_stack,
+    fig=fig,
+    color="C1",
+    hist_kwargs={"density": True},
+    plot_datapoints=False,
+    smooth=1.0,
 )
 fig.legend(
     handles=[
-        plt.Line2D([], [], color="C0", label=f"NSS ({result.wall_time:.0f} s, log Z = {result.logz:.0f})"),
+        plt.Line2D(
+            [], [], color="C0", label=f"NSS ({result.wall_time:.0f} s, log Z = {result.logz:.0f})"
+        ),
         plt.Line2D([], [], color="C1", label=f"NUTS ({nuts.wall_time:.0f} s)"),
     ],
-    loc="upper right", frameon=False,
+    loc="upper right",
+    frameon=False,
 )
 plt.show()
 

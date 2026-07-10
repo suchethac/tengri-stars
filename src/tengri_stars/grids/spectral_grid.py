@@ -52,7 +52,9 @@ class SpectralGrid:
         flux_np = np.asarray(flux, dtype=float)
         expected = (*(a.size for a in axes_np), wave_np.size)
         if flux_np.shape != expected:
-            raise ValueError(f"flux shape {flux_np.shape} != (n_teff, n_logg, n_feh, n_wave) {expected}")
+            raise ValueError(
+                f"flux shape {flux_np.shape} != (n_teff, n_logg, n_feh, n_wave) {expected}"
+            )
         for name, axis in zip(_AXIS_NAMES, axes_np):
             if axis.size < 2 or np.any(np.diff(axis) <= 0):
                 raise ValueError(f"{name} axis must be sorted with >= 2 unique nodes")

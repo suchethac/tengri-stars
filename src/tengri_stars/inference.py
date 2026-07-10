@@ -186,10 +186,7 @@ def fit_nss(
         remaining = float(live.integrator.logZ_live - live.integrator.logZ)
         if verbose and n_iter % 10 == 0:
             logz_est = float(jnp.logaddexp(live.integrator.logZ, live.integrator.logZ_live))
-            print(
-                f"  NSS iter {n_iter}: log Z ≈ {logz_est:.2f}, "
-                f"elapsed={time.time() - t0:.1f}s"
-            )
+            print(f"  NSS iter {n_iter}: log Z ≈ {logz_est:.2f}, elapsed={time.time() - t0:.1f}s")
         if remaining < log_evidence_tol or n_iter >= max_iterations:
             break
 
