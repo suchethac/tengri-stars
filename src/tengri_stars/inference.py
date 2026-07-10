@@ -75,6 +75,35 @@ class NSSResult(_PosteriorSummary):
 
 
 @dataclass(frozen=True)
+class MAPResult:
+    """L-BFGS maximum-a-posteriori point for one star.
+
+    Parameters
+    ----------
+    params : dict of str -> float
+        MAP parameter values, physical units.
+    xi : dict of str -> float
+        MAP position in unbounded ξ-space — pass as ``init_xi`` to
+        :func:`fit_nuts` (tengri's default recipe: L-BFGS MAP then NUTS).
+    neg_log_posterior : float
+        Information Hamiltonian at the MAP (lower is better).
+    success : bool
+        Whether the best restart converged.
+    n_restarts : int
+        Restarts attempted (best kept).
+    wall_time : float
+        Optimization wall-clock time [s], including JIT compilation.
+    """
+
+    params: dict[str, float]
+    xi: dict[str, float]
+    neg_log_posterior: float
+    success: bool
+    n_restarts: int
+    wall_time: float
+
+
+@dataclass(frozen=True)
 class NUTSResult(_PosteriorSummary):
     """NUTS (blackjax) posterior for one star.
 
@@ -210,6 +239,92 @@ def fit_nss(
     )
 
 
+def fit_map(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    key,
+    n_restarts: int = 4,
+    max_iterations: int = 500,
+) -> MAPResult:
+    """L-BFGS maximum-a-posteriori fit in unbounded ξ-space.
+
+    Mirrors tengri's MAP backend (``optimizer='lbfgs'`` in
+    ``inference/backends/map_dispatch.py``): scipy L-BFGS-B driven by a
+    JIT-compiled ``jax.value_and_grad`` of the information Hamiltonian
+    ``-log L(h(ξ)) + ξᵀξ/2``. The bounded ``unstandardize`` transform keeps the
+    optimizer inside the grid hull (the clamped LUT has zero gradient outside).
+
+    Stellar posteriors can be multimodal (dwarf/giant), so the optimizer runs
+    from ``n_restarts`` prior-drawn starts and keeps the best. For posterior
+    *width* use :func:`fit_nss` or :func:`fit_nuts`; the MAP is the fast point
+    estimate and the standard NUTS initializer (pass ``result.xi`` as
+    ``init_xi``).
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict[str, scalar]) -> scalar`` log-likelihood, JAX-traceable
+        and differentiable.
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors; each must expose ``unstandardize(xi)``.
+    key : jax.random.PRNGKey
+        Random key for the restart draws.
+    n_restarts : int
+        Optimizer starts: ξ = 0 (prior center) plus ``n_restarts - 1``
+        standard-normal draws.
+    max_iterations : int
+        L-BFGS-B iteration cap per restart.
+
+    Returns
+    -------
+    MAPResult
+    """
+    import numpy as np
+    from scipy.optimize import minimize as scipy_minimize
+
+    names = tuple(priors)
+    dim = len(names)
+
+    def to_physical_vec(xi_vec):
+        return {name: priors[name].unstandardize(xi_vec[i]) for i, name in enumerate(names)}
+
+    @jax.jit
+    def neg_log_posterior(xi_vec):
+        return -loglikelihood_fn(to_physical_vec(xi_vec)) + 0.5 * jnp.sum(xi_vec**2)
+
+    value_and_grad = jax.jit(jax.value_and_grad(neg_log_posterior))
+
+    def objective(x):
+        value, grad = value_and_grad(jnp.asarray(x))
+        return float(value), np.asarray(grad, dtype=float)
+
+    t0 = time.time()
+    starts = [np.zeros(dim)]
+    for r in range(n_restarts - 1):
+        starts.append(np.asarray(jax.random.normal(jax.random.fold_in(key, r), (dim,))))
+
+    best = None
+    for x0 in starts:
+        res = scipy_minimize(
+            objective, x0, jac=True, method="L-BFGS-B", options={"maxiter": max_iterations}
+        )
+        if best is None or res.fun < best.fun:
+            best = res
+    wall_time = time.time() - t0
+
+    xi_best = jnp.asarray(best.x)
+    physical = to_physical_vec(xi_best)
+    return MAPResult(
+        params={name: float(physical[name]) for name in names},
+        xi={name: float(best.x[i]) for i, name in enumerate(names)},
+        neg_log_posterior=float(best.fun),
+        success=bool(best.success),
+        n_restarts=len(starts),
+        wall_time=wall_time,
+    )
+
+
 def fit_nuts(
     loglikelihood_fn: Callable,
     priors: dict,
@@ -217,6 +332,7 @@ def fit_nuts(
     key,
     num_warmup: int = 1000,
     num_samples: int = 1000,
+    init_xi: dict | None = None,
 ) -> NUTSResult:
     """Sample a star posterior with blackjax NUTS in unbounded ξ-space.
 
@@ -245,6 +361,10 @@ def fit_nuts(
         Window-adaptation steps (step size + mass matrix).
     num_samples : int
         Posterior draws after warmup.
+    init_xi : dict of str -> float, optional
+        Starting position in ξ-space, e.g. :attr:`MAPResult.xi` from
+        :func:`fit_map` (tengri's default recipe). Defaults to ξ = 0
+        (prior centers).
 
     Returns
     -------
@@ -263,7 +383,10 @@ def fit_nuts(
 
     t0 = time.time()
     key, warmup_key, sample_key = jax.random.split(key, 3)
-    xi0 = {name: jnp.asarray(0.0) for name in names}
+    if init_xi is None:
+        xi0 = {name: jnp.asarray(0.0) for name in names}
+    else:
+        xi0 = {name: jnp.asarray(init_xi[name]) for name in names}
     warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
     (state, tuned), _ = warmup.run(warmup_key, xi0, num_steps=num_warmup)
     kernel = blackjax.nuts(logdensity, **tuned).step

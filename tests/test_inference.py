@@ -6,7 +6,7 @@ import numpy as np
 from astropy.table import Table
 from tengri import Uniform
 
-from tengri_stars import StarModel, fit_nss, fit_nuts
+from tengri_stars import StarModel, fit_map, fit_nss, fit_nuts
 from tengri_stars.grids import load_photometry_grid
 
 COEFFS = {
@@ -61,6 +61,41 @@ def test_nss_recovers_mock_star_with_calibrated_posterior():
         assert lo < true_val < hi, f"{name}: truth {true_val} outside [{lo:.3f}, {hi:.3f}]"
     # Posterior must be informative: much narrower than the prior.
     assert np.std(np.asarray(result.samples["feh"])) < 0.3
+
+
+def test_lbfgs_map_recovers_mock_star_and_seeds_nuts():
+    """L-BFGS MAP lands near truth; its ξ seeds NUTS (tengri's default recipe)."""
+    model = StarModel(grid=_toy_grid())
+    truth = {"teff": 4600.0, "logg": 2.2, "feh": -1.3, "mu": 14.5}
+    sigma = 0.02
+
+    key = jax.random.PRNGKey(42)
+    key, noise_key = jax.random.split(key)
+    mags_obs = model.predict_mags(**truth) + sigma * jax.random.normal(noise_key, (5,))
+
+    def loglikelihood(p):
+        pred = model.predict_mags(teff=p["teff"], logg=p["logg"], feh=p["feh"], mu=p["mu"])
+        return -0.5 * jnp.sum(((pred - mags_obs) / sigma) ** 2)
+
+    priors = {
+        "teff": Uniform(4000.0, 5200.0),
+        "logg": Uniform(1.0, 3.0),
+        "feh": Uniform(-3.0, 0.0),
+        "mu": Uniform(10.0, 20.0),
+    }
+
+    result = fit_map(loglikelihood, priors, key=key)
+
+    assert result.success
+    assert abs(result.params["teff"] - truth["teff"]) < 100.0
+    assert abs(result.params["feh"] - truth["feh"]) < 0.2
+    assert abs(result.params["mu"] - truth["mu"]) < 0.2
+
+    nuts = fit_nuts(
+        loglikelihood, priors, key=key, num_warmup=300, num_samples=300, init_xi=result.xi
+    )
+    lo, hi = np.percentile(np.asarray(nuts.samples["feh"]), [2.5, 97.5])
+    assert lo < truth["feh"] < hi
 
 
 def test_nuts_recovers_mock_star_and_agrees_with_nss():
