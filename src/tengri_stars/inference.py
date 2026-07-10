@@ -105,7 +105,7 @@ class MAPResult:
 
 @dataclass(frozen=True)
 class NUTSResult(_PosteriorSummary):
-    """NUTS (blackjax) posterior for one star.
+    """Gradient-sampler (blackjax NUTS/HMC) posterior for one star.
 
     Parameters
     ----------
@@ -117,12 +117,64 @@ class NUTSResult(_PosteriorSummary):
         Number of divergent transitions in the sampling phase.
     wall_time : float
         Sampling wall-clock time [s], including JIT compilation.
+    tuned_params : dict or None
+        Window-adaptation output (step size, mass matrix). Pass to another
+        ``fit_nuts``/``fit_hmc`` call as ``tuned_params=`` to skip warmup —
+        the adapt-once / sample-many catalog pattern.
     """
 
     samples: dict[str, jnp.ndarray]
     acceptance_rate: float
     num_divergent: int
     wall_time: float
+    tuned_params: dict | None = None
+
+
+#: JIT-compiled NSS (init, step) programs keyed by likelihood identity, prior
+#: signature, and sampler settings — data enters as a *traced* argument, so one
+#: compiled XLA program serves every star with the same band layout (the same
+#: cross-object cache pattern as tengri's ``run_nss``).
+_NSS_JIT_CACHE: dict = {}
+
+
+def _nss_fns(loglikelihood_fn, priors, num_inner_steps, num_delete, max_steps, max_shrinkage):
+    """Return cached JIT (init, step) taking ``data`` as a traced argument."""
+    names = tuple(priors)
+    cache_key = (
+        id(loglikelihood_fn),
+        tuple((name, repr(priors[name])) for name in names),
+        num_inner_steps,
+        num_delete,
+        max_steps,
+        max_shrinkage,
+    )
+    hit = _NSS_JIT_CACHE.get(cache_key)
+    # Hold the function itself in the cache so id() cannot be recycled.
+    if hit is not None and hit[0] is loglikelihood_fn:
+        return hit[1], hit[2]
+
+    def logprior_fn(params):
+        return jnp.sum(jnp.stack([priors[name].log_prob(params[name]) for name in names]))
+
+    def _algo(data):
+        return as_top_level_api(
+            logprior_fn,
+            lambda p: loglikelihood_fn(p, data),
+            num_inner_steps,
+            num_delete=num_delete,
+            max_steps=max_steps,
+            max_shrinkage=max_shrinkage,
+        )
+
+    def _init(particles, data):
+        return _algo(data).init(particles)
+
+    def _step(step_key, state, data):
+        return _algo(data).step(step_key, state)
+
+    entry = (loglikelihood_fn, jax.jit(_init), jax.jit(_step))
+    _NSS_JIT_CACHE[cache_key] = entry
+    return entry[1], entry[2]
 
 
 def fit_nss(
@@ -130,6 +182,7 @@ def fit_nss(
     priors: dict,
     *,
     key,
+    data=None,
     n_live: int = 500,
     num_delete: int = 50,
     num_inner_steps: int | None = None,
@@ -145,12 +198,18 @@ def fit_nss(
     Parameters
     ----------
     loglikelihood_fn : callable
-        ``(params: dict[str, scalar]) -> scalar`` log-likelihood, JAX-traceable.
+        Without ``data``: ``(params: dict) -> scalar``. With ``data``:
+        ``(params: dict, data) -> scalar`` — data enters the compiled program
+        as a traced argument, so the XLA compile is paid once and reused for
+        every star sharing the same band layout (define the function once at
+        module/notebook scope; the cache is keyed on its identity).
     priors : dict of str -> tengri Distribution
         Per-parameter priors; each must expose ``sample(key)`` and
         ``log_prob(x)`` (e.g. :class:`tengri.Uniform`).
     key : jax.random.PRNGKey
         Random key for the whole run.
+    data : array_like, optional
+        Per-star observed data forwarded to ``loglikelihood_fn``.
     n_live : int
         Live points. More = better evidence and multimodal coverage.
     num_delete : int
@@ -179,20 +238,18 @@ def fit_nss(
     if num_inner_steps is None:
         num_inner_steps = dim
 
-    def logprior_fn(params):
-        parts = [priors[name].log_prob(params[name]) for name in names]
-        return jnp.sum(jnp.stack(parts))
+    if data is None:
+        user_fn = loglikelihood_fn
 
-    algo = as_top_level_api(
-        logprior_fn,
-        loglikelihood_fn,
-        num_inner_steps,
-        num_delete=num_delete,
-        max_steps=max_steps,
-        max_shrinkage=max_shrinkage,
+        def loglikelihood_fn(p, _data, _user_fn=user_fn):
+            return _user_fn(p)
+
+        data = jnp.zeros(())
+    data = jnp.asarray(data)
+
+    init_jit, step_jit = _nss_fns(
+        loglikelihood_fn, priors, num_inner_steps, num_delete, max_steps, max_shrinkage
     )
-    init_jit = jax.jit(algo.init)
-    step_jit = jax.jit(algo.step)
 
     key, init_key = jax.random.split(key)
     particles = {
@@ -203,12 +260,12 @@ def fit_nss(
     }
 
     t0 = time.time()
-    live = init_jit(particles)
+    live = init_jit(particles, data)
     dead_particles = []
     n_iter = 0
     while True:
         key, step_key = jax.random.split(key)
-        live, dead = step_jit(step_key, live)
+        live, dead = step_jit(step_key, live, data)
         dead_particles.append(dead.particles)
         n_iter += 1
 
@@ -325,6 +382,200 @@ def fit_map(
     )
 
 
+def _run_blackjax(
+    algo_name: str,
+    algo_kwargs: dict,
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    key,
+    num_warmup: int,
+    num_samples: int,
+    init_xi: dict | None,
+    tuned_params: dict | None,
+) -> NUTSResult:
+    """Shared NUTS/HMC driver on the ξ-space information Hamiltonian."""
+    import blackjax
+
+    algorithm = getattr(blackjax, algo_name)
+    names = tuple(priors)
+
+    def to_physical(xi):
+        return {name: priors[name].unstandardize(xi[name]) for name in names}
+
+    def logdensity(xi):
+        prior_term = -0.5 * jnp.sum(jnp.stack([xi[name] ** 2 for name in names]))
+        return loglikelihood_fn(to_physical(xi)) + prior_term
+
+    t0 = time.time()
+    key, warmup_key, sample_key = jax.random.split(key, 3)
+    if init_xi is None:
+        xi0 = {name: jnp.asarray(0.0) for name in names}
+    else:
+        xi0 = {name: jnp.asarray(init_xi[name]) for name in names}
+
+    if tuned_params is None:
+        warmup = blackjax.window_adaptation(algorithm, logdensity, **algo_kwargs)
+        (state, tuned), _ = warmup.run(warmup_key, xi0, num_steps=num_warmup)
+        # window_adaptation folds the algorithm extras into its returned params.
+        tuned = {**algo_kwargs, **tuned}
+    else:
+        tuned = {**algo_kwargs, **tuned_params}
+        state = algorithm(logdensity, **tuned).init(xi0)
+
+    kernel = algorithm(logdensity, **tuned).step
+
+    def one_step(state, step_key):
+        state, info = kernel(step_key, state)
+        return state, (state.position, info.acceptance_rate, info.is_divergent)
+
+    _, (positions, acceptance, divergent) = jax.lax.scan(
+        one_step, state, jax.random.split(sample_key, num_samples)
+    )
+    wall_time = time.time() - t0
+
+    return NUTSResult(
+        samples={name: priors[name].unstandardize(positions[name]) for name in names},
+        acceptance_rate=float(jnp.mean(acceptance)),
+        num_divergent=int(jnp.sum(divergent)),
+        wall_time=wall_time,
+        tuned_params=dict(tuned),
+    )
+
+
+def make_hmc_pipeline(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    num_warmup: int = 500,
+    num_samples: int = 1000,
+    num_integration_steps: int = 32,
+) -> Callable:
+    """Compile the *entire* HMC inference into one XLA graph: data in → posterior out.
+
+    Window adaptation, kernel construction, and the sampling scan all trace
+    into a single ``jax.jit`` program with the observed data as a traced
+    argument: the compile is paid once, every subsequent star is pure device
+    execution (no Python loop, no host synchronization, no retraces), and the
+    returned function ``jax.vmap``s over a whole catalog —
+    ``vmap(pipeline)(keys, mags_batch)`` samples every star in one XLA call.
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict, data) -> scalar``, JAX-differentiable. Define once and
+        reuse — the compile cache is keyed on the returned pipeline function.
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors exposing ``unstandardize(xi)``.
+    num_warmup : int
+        Window-adaptation steps (traced into the graph).
+    num_samples : int
+        Posterior draws per star.
+    num_integration_steps : int
+        Leapfrog steps per HMC proposal.
+
+    Returns
+    -------
+    callable
+        JIT-compiled ``(key, data) -> (samples, info)`` where ``samples`` maps
+        parameter name → ndarray shape (num_samples,) in physical units and
+        ``info`` carries ``acceptance_rate`` and ``num_divergent`` (as arrays,
+        so the pipeline stays vmap-safe).
+    """
+    import blackjax
+
+    names = tuple(priors)
+
+    def to_physical(xi):
+        return {name: priors[name].unstandardize(xi[name]) for name in names}
+
+    def _pipeline(key, data):
+        def logdensity(xi):
+            prior_term = -0.5 * jnp.sum(jnp.stack([xi[name] ** 2 for name in names]))
+            return loglikelihood_fn(to_physical(xi), data) + prior_term
+
+        warmup_key, sample_key = jax.random.split(key)
+        xi0 = {name: jnp.asarray(0.0) for name in names}
+        warmup = blackjax.window_adaptation(
+            blackjax.hmc, logdensity, num_integration_steps=num_integration_steps
+        )
+        (state, tuned), _ = warmup.run(warmup_key, xi0, num_steps=num_warmup)
+        kernel = blackjax.hmc(
+            logdensity, **{"num_integration_steps": num_integration_steps, **tuned}
+        ).step
+
+        def one_step(state, step_key):
+            state, info = kernel(step_key, state)
+            return state, (state.position, info.acceptance_rate, info.is_divergent)
+
+        _, (positions, acceptance, divergent) = jax.lax.scan(
+            one_step, state, jax.random.split(sample_key, num_samples)
+        )
+        samples = {name: priors[name].unstandardize(positions[name]) for name in names}
+        info = {"acceptance_rate": jnp.mean(acceptance), "num_divergent": jnp.sum(divergent)}
+        return samples, info
+
+    return jax.jit(_pipeline)
+
+
+def fit_hmc(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    key,
+    num_warmup: int = 500,
+    num_samples: int = 1000,
+    num_integration_steps: int = 32,
+    init_xi: dict | None = None,
+    tuned_params: dict | None = None,
+) -> NUTSResult:
+    """Sample a star posterior with blackjax HMC (fixed integration length).
+
+    Same ξ-space information Hamiltonian as :func:`fit_nuts`, but each proposal
+    integrates a *fixed* ``num_integration_steps`` leapfrog trajectory instead
+    of NUTS's adaptive tree doubling — cheaper per effective sample when the
+    posterior geometry is benign (unimodal, roughly isotropic after the mass-
+    matrix adaptation), at the cost of a hand-picked trajectory length.
+
+    For catalogs, pass ``tuned_params`` from a previous fit on a similar star
+    to skip warmup entirely (adapt once, sample many).
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict[str, scalar]) -> scalar``, JAX-differentiable.
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors exposing ``unstandardize(xi)``.
+    key : jax.random.PRNGKey
+        Random key for warmup and sampling.
+    num_warmup : int
+        Window-adaptation steps (ignored when ``tuned_params`` is given).
+    num_samples : int
+        Posterior draws.
+    num_integration_steps : int
+        Leapfrog steps per proposal.
+    init_xi : dict, optional
+        Starting ξ position (e.g. :attr:`MAPResult.xi`).
+    tuned_params : dict, optional
+        ``NUTSResult.tuned_params`` from a previous run; skips warmup.
+
+    Returns
+    -------
+    NUTSResult
+    """
+    return _run_blackjax(
+        "hmc",
+        {"num_integration_steps": num_integration_steps},
+        loglikelihood_fn,
+        priors,
+        key=key,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        init_xi=init_xi,
+        tuned_params=tuned_params,
+    )
+
+
 def fit_nuts(
     loglikelihood_fn: Callable,
     priors: dict,
@@ -333,6 +584,7 @@ def fit_nuts(
     num_warmup: int = 1000,
     num_samples: int = 1000,
     init_xi: dict | None = None,
+    tuned_params: dict | None = None,
 ) -> NUTSResult:
     """Sample a star posterior with blackjax NUTS in unbounded ξ-space.
 
@@ -365,44 +617,22 @@ def fit_nuts(
         Starting position in ξ-space, e.g. :attr:`MAPResult.xi` from
         :func:`fit_map` (tengri's default recipe). Defaults to ξ = 0
         (prior centers).
+    tuned_params : dict, optional
+        ``NUTSResult.tuned_params`` from a previous run on a similar star;
+        skips warmup entirely (adapt once, sample many).
 
     Returns
     -------
     NUTSResult
     """
-    import blackjax
-
-    names = tuple(priors)
-
-    def to_physical(xi):
-        return {name: priors[name].unstandardize(xi[name]) for name in names}
-
-    def logdensity(xi):
-        prior_term = -0.5 * jnp.sum(jnp.stack([xi[name] ** 2 for name in names]))
-        return loglikelihood_fn(to_physical(xi)) + prior_term
-
-    t0 = time.time()
-    key, warmup_key, sample_key = jax.random.split(key, 3)
-    if init_xi is None:
-        xi0 = {name: jnp.asarray(0.0) for name in names}
-    else:
-        xi0 = {name: jnp.asarray(init_xi[name]) for name in names}
-    warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
-    (state, tuned), _ = warmup.run(warmup_key, xi0, num_steps=num_warmup)
-    kernel = blackjax.nuts(logdensity, **tuned).step
-
-    def one_step(state, step_key):
-        state, info = kernel(step_key, state)
-        return state, (state.position, info.acceptance_rate, info.is_divergent)
-
-    _, (positions, acceptance, divergent) = jax.lax.scan(
-        one_step, state, jax.random.split(sample_key, num_samples)
-    )
-    wall_time = time.time() - t0
-
-    return NUTSResult(
-        samples={name: priors[name].unstandardize(positions[name]) for name in names},
-        acceptance_rate=float(jnp.mean(acceptance)),
-        num_divergent=int(jnp.sum(divergent)),
-        wall_time=wall_time,
+    return _run_blackjax(
+        "nuts",
+        {},
+        loglikelihood_fn,
+        priors,
+        key=key,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        init_xi=init_xi,
+        tuned_params=tuned_params,
     )
