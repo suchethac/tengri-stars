@@ -13,6 +13,7 @@ from tengri_stars.inference import (
     make_nss_pipeline,
 )
 from tengri_stars.model import StarModel
+from tengri_stars.plotting import overlay_corner
 
 __version__ = "0.0.1"
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "load_photometry_grid",
     "make_hmc_pipeline",
     "make_nss_pipeline",
+    "overlay_corner",
 ]

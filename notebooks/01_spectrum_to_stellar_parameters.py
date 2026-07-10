@@ -37,14 +37,13 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # silence XLA/PJRT C++ chatt
 
 import time
 
-import corner
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from tengri import Uniform
 
-from tengri_stars import SpectralGrid, StarModel, fit_nss
+from tengri_stars import SpectralGrid, StarModel, fit_nss, overlay_corner
 
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(3)
@@ -165,11 +164,11 @@ print(
 # %%
 labels = [r"$T_{\rm eff}$ [K]", r"$\log g$", "[Fe/H]", r"$v_r$ [km/s]", r"$\log A$"]
 names = list(priors)
-stack = np.column_stack([np.asarray(result.samples[n]) for n in names])
-fig = corner.corner(
-    stack,
+fig = overlay_corner(
+    [result.samples],
+    names=names,
     labels=labels,
-    truths=[TRUTH["teff"], TRUTH["logg"], TRUTH["feh"], TRUTH["rv_kms"], TRUTH["log_amp"]],
+    truths=TRUTH,
     quantiles=[0.16, 0.5, 0.84],
     show_titles=True,
     title_fmt=".2f",
@@ -270,35 +269,16 @@ for n in names:
 # samplers.
 
 # %%
-nuts_stack = np.column_stack([np.asarray(nuts.samples[n]) for n in names])
-truth_vec = [TRUTH[n] for n in names]
-
-fig = corner.corner(
-    stack,
+fig = overlay_corner(
+    [result.samples, nuts.samples],
+    names=names,
     labels=labels,
-    truths=truth_vec,
-    color="C0",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-corner.corner(
-    nuts_stack,
-    fig=fig,
-    color="C1",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-fig.legend(
-    handles=[
-        plt.Line2D(
-            [], [], color="C0", label=f"NSS ({result.wall_time:.0f} s, log Z = {result.logz:.0f})"
-        ),
-        plt.Line2D([], [], color="C1", label=f"NUTS ({nuts.wall_time:.0f} s)"),
+    colors=["C0", "C1"],
+    legend_labels=[
+        f"NSS ({result.wall_time:.0f} s, log Z = {result.logz:.0f})",
+        f"NUTS ({nuts.wall_time:.0f} s)",
     ],
-    loc="upper right",
-    frameon=False,
+    truths=TRUTH,
 )
 plt.show()
 

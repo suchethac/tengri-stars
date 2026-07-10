@@ -36,6 +36,7 @@ dependencies = [
     "astro-tengri @ git+https://github.com/suchethac/tengri.git@c407bb3b6196c7b0648896464a7a917173646056",
     "astropy>=5.3",
     "blackjax>=1.0",  # fit_nuts / fit_hmc / make_hmc_pipeline
+    "corner>=2.2",  # overlay_corner
     "jax>=0.4.20",
     "numpy>=1.24",
     "scipy>=1.10",  # fit_map (L-BFGS-B)
@@ -52,8 +53,7 @@ dev = [
     "ruff>=0.4",
 ]
 crossval = [
-    "astro-brutus>=1.1",  # notebooks/03_brutus_crossval.py
-    "corner>=2.2",
+    "astro-brutus>=1.1",  # notebooks/04_brutus_crossval.py
 ]
 
 [tool.setuptools.packages.find]

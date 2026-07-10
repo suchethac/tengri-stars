@@ -39,14 +39,19 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # silence XLA/PJRT C++ chatt
 import time
 from pathlib import Path
 
-import corner
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from tengri import Uniform
 
-from tengri_stars import StarModel, fit_nss, load_photometry_grid, make_hmc_pipeline
+from tengri_stars import (
+    StarModel,
+    fit_nss,
+    load_photometry_grid,
+    make_hmc_pipeline,
+    overlay_corner,
+)
 
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(23)
@@ -237,32 +242,16 @@ nss = fit_nss(
 t_nss = time.time() - t0
 
 names = list(priors)
-stack_hmc = np.column_stack([np.asarray(samples[n]) for n in names])
-stack_nss = np.column_stack([np.asarray(nss.samples[n]) for n in names])
-fig = corner.corner(
-    stack_hmc,
+fig = overlay_corner(
+    [samples, nss.samples],
+    names=names,
     labels=[r"$T_{\rm eff}$", r"$\log g$", "[Fe/H]", r"$\mu$"],
-    truths=[truth[n] for n in names],
-    color="C1",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-corner.corner(
-    stack_nss,
-    fig=fig,
-    color="C0",
-    hist_kwargs={"density": True},
-    plot_datapoints=False,
-    smooth=1.0,
-)
-fig.legend(
-    handles=[
-        plt.Line2D([], [], color="C1", label=f"jitted HMC pipeline ({t_warm:.2f} s warm)"),
-        plt.Line2D([], [], color="C0", label=f"NSS ({t_nss:.1f} s, log Z = {nss.logz:.0f})"),
+    colors=["C1", "C0"],
+    legend_labels=[
+        f"jitted HMC pipeline ({t_warm:.2f} s warm)",
+        f"NSS ({t_nss:.1f} s, log Z = {nss.logz:.0f})",
     ],
-    loc="upper right",
-    frameon=False,
+    truths=truth,
 )
 plt.show()
 
