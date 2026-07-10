@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 import numpy as np
 from astropy.table import Table
-
 from tengri.utils import edges_for_grid, interp_nd_triweight
 
 _AXIS_COLUMNS = ("teff", "logg", "feh")
@@ -110,8 +109,7 @@ def load_photometry_grid(
     coverage = np.zeros(shape, dtype=bool)
     for (teff, logg, feh), row in node_rows.items():
         idx = tuple(
-            int(np.searchsorted(axis, value))
-            for axis, value in zip(axes_np, (teff, logg, feh))
+            int(np.searchsorted(axis, value)) for axis, value in zip(axes_np, (teff, logg, feh))
         )
         phot[idx] = [float(table[name][row]) for name in names]
         coverage[idx] = True
