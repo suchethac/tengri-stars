@@ -54,6 +54,16 @@ def test_extinction_adds_per_filter_reddening():
     np.testing.assert_allclose(reddened - base, 0.1 * np.asarray(RED_COEFFS), rtol=1e-12)
 
 
+def test_model_interp_method_pchip_is_node_exact():
+    grid = _toy_grid()
+    model = StarModel(grid=grid, interp_method="pchip")
+
+    mags = model.predict_mags(teff=4000.0, logg=1.0, feh=-3.0)  # corner node
+
+    expected = [c0 + ct * 4000.0 + cg * 1.0 + cf * -3.0 for (c0, ct, cg, cf) in COEFFS.values()]
+    np.testing.assert_allclose(mags, expected, rtol=1e-12)
+
+
 def test_mock_star_recovery_via_gradient_descent():
     """End-to-end physics test: a mock star is recovered by gradient-based MAP.
 

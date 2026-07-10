@@ -88,6 +88,32 @@ def test_interpolate_is_differentiable_with_correct_slope():
     np.testing.assert_allclose(dmag_dteff, COEFFS["lsst_g_ab"][1], rtol=0.05)
 
 
+def test_pchip_is_node_exact_for_curved_payload_at_boundary():
+    """PCHIP is an interpolant: exact at every node, even for nonlinear payloads
+    at boundary nodes where the triweight smoother is biased."""
+    table = _toy_table()
+    table["cahk"] = np.asarray(table["cahk"]) ** 2 / 40.0  # curve the payload
+    grid = load_photometry_grid(table)
+    corner = (TEFF_NODES[0], LOGG_NODES[0], FEH_NODES[0])
+
+    pchip = grid.interpolate(teff=corner[0], logg=corner[1], feh=corner[2], method="pchip")
+    triweight = grid.interpolate(teff=corner[0], logg=corner[1], feh=corner[2])
+
+    expected = _mag("cahk", *corner) ** 2 / 40.0
+    np.testing.assert_allclose(pchip[1], expected, rtol=1e-12)
+    assert abs(float(triweight[1]) - expected) > 1e-6  # smoother is biased here
+
+
+def test_pchip_gradient_exact_for_linear_payload():
+    grid = load_photometry_grid(_toy_table())
+
+    dmag_dteff = jax.grad(
+        lambda t: grid.interpolate(teff=t, logg=2.0, feh=-1.0, method="pchip")[0]
+    )(4500.0)
+
+    np.testing.assert_allclose(dmag_dteff, COEFFS["lsst_g_ab"][1], rtol=1e-8)
+
+
 def test_duplicate_nodes_prefer_averaged_row():
     grid = load_photometry_grid(_toy_table(duplicate_first=True))
 

@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 from astropy.table import Table
 from tengri.utils import edges_for_grid, interp_nd_triweight
+from tengri.utils.grid_interp import interp_nd_pchip
 
 _AXIS_COLUMNS = ("teff", "logg", "feh")
 # Axis columns and their duplicated survey-label variants ("[Fe/H]_1", "Teff_1", ...).
@@ -44,8 +45,8 @@ class PhotometryGrid:
     filter_names: tuple[str, ...]
     coverage: jnp.ndarray
 
-    def interpolate(self, *, teff, logg, feh) -> jnp.ndarray:
-        """Interpolate magnitudes at one point; C²-smooth, JIT/grad/vmap-safe.
+    def interpolate(self, *, teff, logg, feh, method: str = "triweight") -> jnp.ndarray:
+        """Interpolate magnitudes at one point; JIT/grad/vmap-safe.
 
         Parameters
         ----------
@@ -55,13 +56,23 @@ class PhotometryGrid:
             Surface gravity [dex (cm/s²)].
         feh : scalar
             Metallicity [Fe/H] [dex].
+        method : {'triweight', 'pchip'}
+            ``'triweight'``: C²-smooth kernel *smoother* (best gradients for
+            HMC/NUTS; slightly biased at nodes). ``'pchip'``: node-exact
+            monotone-cubic *interpolant*, C¹ — preferred when node fidelity
+            matters or the sampler needs no gradients (e.g. NSS).
 
         Returns
         -------
         jnp.ndarray, shape (n_filters,)
             Interpolated magnitudes [AB mag].
         """
-        return interp_nd_triweight(self.phot, self.axes, self.edges, (teff, logg, feh))
+        point = (teff, logg, feh)
+        if method == "pchip":
+            return interp_nd_pchip(self.phot, self.axes, point)
+        if method == "triweight":
+            return interp_nd_triweight(self.phot, self.axes, self.edges, point)
+        raise ValueError(f"method must be 'triweight' or 'pchip', got {method!r}")
 
 
 def load_photometry_grid(
