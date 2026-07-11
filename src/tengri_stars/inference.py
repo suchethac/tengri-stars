@@ -468,7 +468,7 @@ def make_laplace_pipeline(
         hess = 0.5 * (hess + hess.T)
         evals, evecs = jnp.linalg.eigh(hess)
         floor = jnp.maximum(1e-8 * jnp.max(jnp.abs(evals)), 1e-10)
-        evals_pd = jnp.clip(evals, min=floor)
+        evals_pd = jnp.clip(evals, floor)
         cov = (evecs * (1.0 / evals_pd)) @ evecs.T
 
         # xi-space prior is a unit Gaussian: its (2 pi)^(-d/2) normalization
@@ -557,7 +557,7 @@ def fit_laplace(
     # so the covariance stays positive-definite instead of silently going NaN.
     evals, evecs = jnp.linalg.eigh(hess)
     floor = 1e-8 * jnp.max(jnp.abs(evals))
-    evals_pd = jnp.clip(evals, a_min=jnp.maximum(floor, 1e-10))
+    evals_pd = jnp.clip(evals, jnp.maximum(floor, 1e-10))
     cov = (evecs * (1.0 / evals_pd)) @ evecs.T
 
     # Laplace evidence. In xi-space the prior is a unit Gaussian, whose
