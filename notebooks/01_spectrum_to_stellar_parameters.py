@@ -43,7 +43,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tengri import Uniform
 
-from tengri_stars import SpectralGrid, StarModel, fit_nss, overlay_corner
+from tengri_stars import (
+    SpectralGrid,
+    StarModel,
+    fit_nss,
+    overlay_corner,
+)
 
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(3)
@@ -259,6 +264,12 @@ nm, nci = nuts.median(), nuts.interval(0.68)
 print(f"{'':10s}{'NSS median':>12s}{'NUTS median':>12s}{'truth':>10s}")
 for n in names:
     print(f"{n:10s}{med[n]:12.2f}{nm[n]:12.2f}{TRUTH[n]:10.2f}")
+
+# Wall time alone is misleading: what matters is *independent* samples per
+# second. NUTS chains are autocorrelated; nested-sampling draws are not.
+print(f"\nNSS : {result.wall_time:5.1f} s, ESS {result.ess:6.0f}  → {result.ess_rate:6.0f} ESS/s")
+print(f"NUTS: {nuts.wall_time:5.1f} s, ESS {nuts.min_ess:6.0f}  → {nuts.ess_rate:6.0f} ESS/s")
+print(f"  NUTS ESS per parameter: { ({n: round(v) for n, v in nuts.ess.items()}) }")
 
 # %% [markdown]
 # ### Posterior overlay — do two very different samplers agree?

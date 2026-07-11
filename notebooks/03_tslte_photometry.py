@@ -46,7 +46,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tengri import Uniform
 
-from tengri_stars import StarModel, fit_nss, fit_nuts, load_photometry_grid, overlay_corner
+from tengri_stars import (
+    StarModel,
+    fit_nss,
+    fit_nuts,
+    load_photometry_grid,
+    make_laplace_pipeline,
+    overlay_corner,
+)
 
 jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(17)
@@ -176,6 +183,73 @@ med, ci = nss.median(), nss.interval(0.68)
 print(f"{'':6s}{'truth':>9s}{'NSS median':>12s}{'68% interval':>22s}")
 for n in names:
     print(f"{n:6s}{TRUTH[n]:9.2f}{med[n]:12.2f}      [{ci[n][0]:8.2f}, {ci[n][1]:8.2f}]")
+
+# %% [markdown]
+# ## 6. The fast path: Laplace on the real grid
+#
+# For a well-constrained star with 21 bands, the posterior is close to Gaussian
+# — so we can skip sampling entirely: optimize to the MAP, take the exact
+# Hessian, and read the covariance off its inverse. `make_laplace_pipeline`
+# does the whole thing (multi-restart BFGS + Hessian + evidence + draws) in one
+# jitted graph with no host round-trip, and `jax.lax.map` walks a catalog
+# through it. See notebook 05 for the full cost analysis.
+
+
+# %% [markdown]
+# **The optimizer is the weak link — and it bit us.** `jax.scipy`'s BFGS,
+# launched from random starts, converged to a *local* optimum on this 21-band
+# posterior: it reported a Hamiltonian of 640 where the true peak is 12, and an
+# evidence 600 nats off. Nested sampling, which explores, was immune.
+#
+# The fix exploits what a grid model is good at: the likelihood is ~10 µs, so
+# `make_laplace_pipeline` **scans the prior box first** (512 points, a few
+# milliseconds) and seeds the BFGS restarts from the best points found. With
+# that, log Z agrees with NSS and the MAP matches scipy's L-BFGS exactly. The
+# lesson generalizes: a Gaussian approximation is only as good as the peak it
+# is expanded around, so always cross-check log Z against an exact sampler on a
+# subset before trusting Laplace across a catalog.
+
+
+# %%
+# The pipeline takes the data as a traced argument (that is what lets one
+# compiled graph serve every star), so give it the two-argument likelihood.
+def loglikelihood_data(p, data):
+    pred = model.predict_mags(teff=p["teff"], logg=p["logg"], feh=p["feh"], mu=p["mu"])[fidx]
+    return -0.5 * jnp.sum(((pred - data) / SIG_MAG) ** 2)
+
+
+laplace = make_laplace_pipeline(loglikelihood_data, priors, n_samples=2000)
+_ = jax.block_until_ready(laplace(jax.random.PRNGKey(6), mags_obs))  # compile
+
+t0 = time.time()
+lap_samples, lap_info = jax.block_until_ready(laplace(jax.random.PRNGKey(7), mags_obs))
+t_lap = time.time() - t0
+print(f"Laplace: {t_lap * 1000:.0f} ms/star (2000 iid draws)")
+print(f"  log Z = {float(lap_info['logz']):.1f}   (NSS gave {nss.logz:.1f})")
+print(f"  → {2000 / t_lap:,.0f} effective samples per second")
+print(
+    f"NSS was {nss.wall_time:.1f} s at {nss.ess_rate:.0f} ESS/s "
+    f"— Laplace is {(2000 / t_lap) / nss.ess_rate:.0f}x more efficient here."
+)
+
+fig = overlay_corner(
+    [nss.samples, lap_samples],
+    names=names,
+    labels=labels_tex,
+    colors=["C0", "C3"],
+    legend_labels=[
+        f"NSS — exact ({nss.wall_time:.1f} s)",
+        f"Laplace — Gaussian ({t_lap * 1000:.0f} ms)",
+    ],
+    truths=TRUTH,
+)
+plt.show()
+
+# %% [markdown]
+# Where the contours agree, Laplace bought the same answer for a fraction of the
+# compute — the catalog workhorse. Where they part (grid edges, or the
+# dwarf/giant bimodality of notebook 04) only the exact sampler can be trusted:
+# a Gaussian sees one mode and quotes a confident, wrong error bar.
 
 # %% [markdown]
 # ## Next steps on real data

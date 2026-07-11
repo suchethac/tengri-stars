@@ -26,6 +26,8 @@ from tengri.inference.backends.nested.base import NSInfo
 from tengri.inference.backends.nested.nss import as_top_level_api
 from tengri.inference.backends.nested.utils import ess as ns_ess, sample as ns_sample
 
+from tengri_stars.diagnostics import ess_summary
+
 
 class _PosteriorSummary:
     """Shared posterior-summary methods; expects a ``samples`` dict attribute."""
@@ -73,6 +75,71 @@ class NSSResult(_PosteriorSummary):
     n_iterations: int
     wall_time: float
 
+    @property
+    def ess_rate(self) -> float:
+        """Effective samples per second — the sampler cost metric [1/s].
+
+        Uses the importance-weight ESS of the nested run, directly comparable
+        with :attr:`NUTSResult.ess_rate` (autocorrelation ESS of the chain).
+        """
+        return self.ess / self.wall_time
+
+
+@dataclass(frozen=True)
+class LaplaceResult(_PosteriorSummary):
+    r"""Laplace (Gaussian) approximation to a star posterior.
+
+    Parameters
+    ----------
+    samples : dict of str -> jnp.ndarray, shape (n_samples,)
+        Draws from the Gaussian approximation, pushed through each prior's
+        bounded transform into physical units. Independent by construction.
+    params : dict of str -> float
+        MAP parameter values, physical units.
+    xi : dict of str -> float
+        MAP position in unbounded ξ-space.
+    cov_xi : jnp.ndarray, shape (n_params, n_params)
+        Posterior covariance in ξ-space — the inverse Hessian of the
+        information Hamiltonian at the MAP.
+    logz : float
+        Laplace evidence estimate [nats]; see Notes.
+    ess : float
+        Effective sample size — equal to ``n_samples`` (iid draws).
+    wall_time : float
+        Optimization + Hessian + sampling wall-clock time [s].
+
+    Notes
+    -----
+    The evidence follows the standard Laplace formula in ξ-space, where the
+    prior is a unit Gaussian:
+
+    .. math::
+
+        \log Z \approx -\mathcal{H}(\xi_{\rm MAP})
+                        - \frac{1}{2}\log\det \mathbf{H}
+
+    with :math:`\mathcal{H} = -\log L + \frac{1}{2}\xi^\top\xi` the
+    information Hamiltonian and :math:`\mathbf{H}` its Hessian at the MAP.
+    The usual :math:`(d/2)\log 2\pi` volume factor is absent because the
+    ξ-space prior is a unit Gaussian, whose normalization cancels it.
+    Exact for a Gaussian posterior; it degrades with skew, and is meaningless
+    for a multimodal one (it sees a single mode) — cross-check against
+    :func:`fit_nss` before trusting it for model comparison.
+    """
+
+    samples: dict[str, jnp.ndarray]
+    params: dict[str, float]
+    xi: dict[str, float]
+    cov_xi: jnp.ndarray
+    logz: float
+    ess: float
+    wall_time: float
+
+    @property
+    def ess_rate(self) -> float:
+        """Effective samples per second [1/s] — comparable across samplers."""
+        return self.ess / self.wall_time
+
 
 @dataclass(frozen=True)
 class MAPResult:
@@ -117,6 +184,8 @@ class NUTSResult(_PosteriorSummary):
         Number of divergent transitions in the sampling phase.
     wall_time : float
         Sampling wall-clock time [s], including JIT compilation.
+    ess : dict of str -> float
+        Per-parameter effective sample size (autocorrelation-based).
     tuned_params : dict or None
         Window-adaptation output (step size, mass matrix). Pass to another
         ``fit_nuts``/``fit_hmc`` call as ``tuned_params=`` to skip warmup —
@@ -127,7 +196,23 @@ class NUTSResult(_PosteriorSummary):
     acceptance_rate: float
     num_divergent: int
     wall_time: float
+    ess: dict[str, float]
     tuned_params: dict | None = None
+
+    @property
+    def min_ess(self) -> float:
+        """Worst per-parameter effective sample size — the honest headline."""
+        return min(self.ess.values())
+
+    @property
+    def ess_rate(self) -> float:
+        """Effective samples per second [1/s], from the worst parameter.
+
+        Comparable with :attr:`NSSResult.ess_rate`. A chain of 1000 draws with
+        an autocorrelation time of 10 bought ~100 independent samples; this is
+        what makes wall-clock timings between samplers meaningful.
+        """
+        return self.min_ess / self.wall_time
 
 
 #: JIT-compiled NSS (init, step) programs keyed by likelihood identity, prior
@@ -292,6 +377,209 @@ def fit_nss(
         logz=logz,
         ess=ess_val,
         n_iterations=n_iter,
+        wall_time=wall_time,
+    )
+
+
+def make_laplace_pipeline(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    n_samples: int = 2000,
+    n_restarts: int = 8,
+    n_scan: int = 512,
+    max_iterations: int = 200,
+) -> Callable:
+    """Laplace posterior as ONE jitted graph — the catalog fast path.
+
+    Everything on device: multi-restart BFGS (``jax.scipy.optimize.minimize``,
+    vmapped over restarts), the exact Hessian, its eigen-repaired inverse, the
+    evidence, and the Gaussian draws. No host round-trip anywhere — which is
+    what separates this from :func:`fit_laplace`, whose scipy L-BFGS-B bounces
+    to the host once per optimizer iteration and so costs seconds rather than
+    milliseconds.
+
+    The returned function is a pure JAX callable, so a whole catalog is
+    ``jax.lax.map(pipeline, (keys, mags))``: the graph is compiled once at
+    *single-star* size and walked on-device, instead of ``vmap``'s batch-sized
+    graph whose compile time grows with the catalog.
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict, data) -> scalar``, twice differentiable.
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors exposing ``unstandardize(xi)``.
+    n_samples : int
+        Draws from the Gaussian approximation (iid).
+    n_restarts : int
+        BFGS restarts, run in parallel under ``vmap``; the best is kept. Seeded
+        from the best points of the prior scan (below), not from random draws.
+    n_scan : int
+        Prior-space points evaluated before optimizing. **This is what makes
+        the optimizer reliable.** A likelihood on a synthetic grid is cheap
+        (~10 µs), and the posterior can be sharp enough that BFGS launched from
+        random starts converges to a local optimum far from the peak (observed:
+        H = 640 instead of 12 on a 21-band fit — a log Z error of 600 nats).
+        Scanning the prior box first and seeding the restarts from its best
+        points fixes that for a few milliseconds.
+    max_iterations : int
+        BFGS iteration cap per restart.
+
+    Returns
+    -------
+    callable
+        JIT-compiled ``(key, data) -> (samples, info)`` where ``info`` carries
+        ``logz``, ``neg_log_posterior``, and ``converged``.
+    """
+    from jax.scipy.optimize import minimize as _jax_minimize
+
+    names = tuple(priors)
+    dim = len(names)
+
+    def _pipeline(key, data):
+        def to_physical(xi_vec):
+            return {name: priors[name].unstandardize(xi_vec[i]) for i, name in enumerate(names)}
+
+        def neg_log_posterior(xi_vec):
+            return -loglikelihood_fn(to_physical(xi_vec), data) + 0.5 * jnp.sum(xi_vec**2)
+
+        init_key, draw_key = jax.random.split(key)
+
+        # Cheap prior-space scan → seed the optimizer at the best points found.
+        # Random starts alone are not enough: on a sharp posterior BFGS happily
+        # converges to a local optimum hundreds of nats from the peak.
+        scan_xi = jnp.concatenate(
+            [jnp.zeros((1, dim)), jax.random.normal(init_key, (n_scan - 1, dim))]
+        )
+        scan_vals = jax.vmap(neg_log_posterior)(scan_xi)
+        best_idx = jnp.argsort(scan_vals)[:n_restarts]
+        starts = scan_xi[best_idx]
+
+        results = jax.vmap(
+            lambda x0: _jax_minimize(
+                neg_log_posterior, x0, method="BFGS", options={"maxiter": max_iterations}
+            )
+        )(starts)
+        best = jnp.argmin(results.fun)
+        xi_map = results.x[best]
+
+        hess = jax.hessian(neg_log_posterior)(xi_map)
+        hess = 0.5 * (hess + hess.T)
+        evals, evecs = jnp.linalg.eigh(hess)
+        floor = jnp.maximum(1e-8 * jnp.max(jnp.abs(evals)), 1e-10)
+        evals_pd = jnp.clip(evals, floor)
+        cov = (evecs * (1.0 / evals_pd)) @ evecs.T
+
+        # xi-space prior is a unit Gaussian: its (2 pi)^(-d/2) normalization
+        # cancels the Laplace volume factor, so no 2 pi term appears.
+        logz = -results.fun[best] - 0.5 * jnp.sum(jnp.log(evals_pd))
+
+        xi_draws = jax.random.multivariate_normal(draw_key, xi_map, cov, shape=(n_samples,))
+        samples = {
+            name: priors[name].unstandardize(xi_draws[:, i]) for i, name in enumerate(names)
+        }
+        info = {
+            "logz": logz,
+            "neg_log_posterior": results.fun[best],
+            "converged": results.success[best],
+        }
+        return samples, info
+
+    return jax.jit(_pipeline)
+
+
+def fit_laplace(
+    loglikelihood_fn: Callable,
+    priors: dict,
+    *,
+    key,
+    n_samples: int = 2000,
+    n_restarts: int = 4,
+    max_iterations: int = 500,
+) -> LaplaceResult:
+    r"""Laplace approximation: MAP + Hessian → Gaussian posterior in one shot.
+
+    The cheapest posterior available. Optimizes the information Hamiltonian in
+    unbounded ξ-space (:func:`fit_map`), takes its Hessian at the optimum by
+    automatic differentiation, and treats the inverse Hessian as the posterior
+    covariance. Draws are then iid — no autocorrelation, so every sample
+    counts — and an evidence estimate comes out for free.
+
+    Costs one optimization plus one :math:`d \times d` Hessian: milliseconds
+    on a grid model, orders of magnitude below NSS or HMC. The price is the
+    assumption: the posterior must be near-Gaussian *in ξ-space* and unimodal.
+    On the classic stellar degeneracies (dwarf/giant bimodality) it will
+    confidently report one mode — validate against :func:`fit_nss` before
+    trusting it on a new problem, then use it for throughput.
+
+    Parameters
+    ----------
+    loglikelihood_fn : callable
+        ``(params: dict[str, scalar]) -> scalar``, JAX-differentiable (twice).
+    priors : dict of str -> tengri Distribution
+        Per-parameter priors exposing ``unstandardize(xi)``.
+    key : jax.random.PRNGKey
+        Random key for the MAP restarts and the Gaussian draws.
+    n_samples : int
+        Draws from the Gaussian approximation.
+    n_restarts : int
+        MAP restarts (best kept) — cheap insurance against a bad local optimum.
+    max_iterations : int
+        L-BFGS-B iteration cap per restart.
+
+    Returns
+    -------
+    LaplaceResult
+    """
+    names = tuple(priors)
+
+    map_result = fit_map(
+        loglikelihood_fn,
+        priors,
+        key=key,
+        n_restarts=n_restarts,
+        max_iterations=max_iterations,
+    )
+    t0 = time.time()
+
+    def to_physical_vec(xi_vec):
+        return {name: priors[name].unstandardize(xi_vec[i]) for i, name in enumerate(names)}
+
+    def neg_log_posterior(xi_vec):
+        return -loglikelihood_fn(to_physical_vec(xi_vec)) + 0.5 * jnp.sum(xi_vec**2)
+
+    xi_map = jnp.asarray([map_result.xi[name] for name in names])
+    hess = jax.jit(jax.hessian(neg_log_posterior))(xi_map)
+    hess = 0.5 * (hess + hess.T)  # symmetrize away autodiff round-off
+
+    # Eigen-repair: clip non-positive curvature (flat directions at grid edges)
+    # so the covariance stays positive-definite instead of silently going NaN.
+    evals, evecs = jnp.linalg.eigh(hess)
+    floor = 1e-8 * jnp.max(jnp.abs(evals))
+    evals_pd = jnp.clip(evals, jnp.maximum(floor, 1e-10))
+    cov = (evecs * (1.0 / evals_pd)) @ evecs.T
+
+    # Laplace evidence. In xi-space the prior is a unit Gaussian, whose
+    # (2*pi)^(-d/2) normalization exactly cancels the Laplace volume factor
+    # (2*pi)^(d/2) — so no 2*pi term survives. (Dropping this cancellation
+    # inflates log Z by (d/2) log 2*pi; the cross-check against fit_nss in the
+    # test suite is what catches it.)
+    logdet = float(jnp.sum(jnp.log(evals_pd)))
+    logz = float(-neg_log_posterior(xi_map) - 0.5 * logdet)
+
+    key, draw_key = jax.random.split(key)
+    xi_draws = jax.random.multivariate_normal(draw_key, xi_map, cov, shape=(n_samples,))
+    samples = {name: priors[name].unstandardize(xi_draws[:, i]) for i, name in enumerate(names)}
+    wall_time = map_result.wall_time + (time.time() - t0)
+
+    return LaplaceResult(
+        samples=samples,
+        params=dict(map_result.params),
+        xi=dict(map_result.xi),
+        cov_xi=cov,
+        logz=logz,
+        ess=float(n_samples),  # iid draws
         wall_time=wall_time,
     )
 
@@ -568,11 +856,13 @@ def _run_blackjax(
     )
     wall_time = time.time() - t0
 
+    samples = {name: priors[name].unstandardize(positions[name]) for name in names}
     return NUTSResult(
-        samples={name: priors[name].unstandardize(positions[name]) for name in names},
+        samples=samples,
         acceptance_rate=float(jnp.mean(acceptance)),
         num_divergent=int(jnp.sum(divergent)),
         wall_time=wall_time,
+        ess=ess_summary(samples),
         tuned_params=dict(tuned),
     )
 
