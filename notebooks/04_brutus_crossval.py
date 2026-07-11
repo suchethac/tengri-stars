@@ -166,6 +166,7 @@ print(
     f"log Z = {ts.logz:.1f}, ESS = {ts.ess:.0f}"
 )
 print("tengri-stars medians:", {k: round(v, 3) for k, v in ts.median().items()})
+print(f"  ESS {ts.ess:.0f} → {ts.ess_rate:.0f} effective samples/s (draws are near-independent)")
 
 # %% [markdown]
 # ## 5. Posterior overlay
