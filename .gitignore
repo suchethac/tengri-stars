@@ -19,3 +19,6 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# Jupyter
+.ipynb_checkpoints/
