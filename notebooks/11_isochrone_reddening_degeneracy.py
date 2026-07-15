@@ -41,11 +41,15 @@
 #    metal-rich subgiant trace almost the same colours through u, g, r, i and
 #    CaHK (§4). The `MISTTrack` posterior stays broad and *biased* along that
 #    ridge — tight error bars in the wrong place — until an external constraint
-#    pins the reddening (§5).
+#    pins the reddening (§5). A parallax, notably, is *not* that constraint: it
+#    tightens the distance but leaves the ridge (§6), because distance is grey
+#    and the ridge is a colour-shape trade.
 #
-# The practical fixes — a dust-map prior, redder photometry, or a parallax —
-# are what the discrete branch test in `tengri_stars.branch` (notebooks 08-10)
-# and the information-content study (notebook 07) build on (§6).
+# What actually breaks the ridge is a reddening lever — a dust-map prior or
+# redder photometry. A parallax instead resolves the dwarf/giant luminosity
+# contrast, the axis the discrete branch test in `tengri_stars.branch`
+# (notebooks 08-10) operates on and the one `MISTTrack`'s isochrone already
+# closes; the information-content study (notebook 07) quantifies each lever.
 
 # %%
 import os
@@ -340,48 +344,107 @@ mist_fix = atmos_frame(track_fixed, res_fix)
 report(mist_fix, ["logg", "teff", "feh", "dist_pc"])
 
 # %% [markdown]
-# The whole argument in one panel — the log g posterior under all three
-# treatments. FreeAtmosphere is broad and reaches toward the dwarf;
-# `MISTTrack` with E(B-V) free is narrower but biased high along the reddening
-# ridge; `MISTTrack` with E(B-V) pinned sits tight on the truth.
+# ## 6. A parallax tightens distance — but does *not* break this ridge
+#
+# Fixing E(B-V) is a reddening constraint. A **parallax** is a *distance*
+# constraint, and it is the lever `tengri_stars.branch` leans on. It drops into
+# the current parametrization with **no change**: keep E(B-V) free, keep the
+# `distance_prior`, and add a Gaussian parallax term to the likelihood — the
+# continuous analogue of the P(ϖ | branch) factor Ani's discrete mixture
+# carries. (`distance_prior='none'` is the documented hook if you would rather
+# let the parallax be the *only* distance information.)
 
 # %%
-fig, ax = plt.subplots(figsize=(7.0, 4.2))
+VARPI_TRUE = 1000.0 / TRUTH["dist_pc"]  # parallax [mas]: d = 10 kpc -> 0.1 mas
+SIGMA_VARPI = 0.015  # mas — an excellent measurement at 10 kpc (best case, to be fair to it)
+key, pk = jax.random.split(key)
+varpi_obs = float(VARPI_TRUE + SIGMA_VARPI * jax.random.normal(pk, ()))
+print(f"parallax: true {VARPI_TRUE:.3f} mas, observed {varpi_obs:.3f} +/- {SIGMA_VARPI} mas")
+
+
+def loglike_parallax(p, data):
+    pred = track.predict_mags(model, p)[fidx]
+    lp = -0.5 * jnp.sum(((pred - data) / SIG) ** 2) + track.log_prior_extra(p)
+    varpi_pred = 1000.0 / p["dist_pc"]  # mas
+    return lp - 0.5 * ((varpi_pred - varpi_obs) / SIGMA_VARPI) ** 2
+
+
+key, sk = jax.random.split(key)
+t0 = time.time()
+res_plx = fit_nss(loglike_parallax, track.default_priors(), key=sk, data=mags_obs,
+                  n_live=1200, n_posterior_samples=3000)
+print(f"MISTTrack, E(B-V) free + parallax: {time.time() - t0:.0f} s, "
+      f"logZ = {float(res_plx.logz):.2f}")
+mist_plx = atmos_frame(track, res_plx)
+report(mist_plx, ["logg", "teff", "feh", "ebmv", "dist_pc"])
+
+# %% [markdown]
+# Read the distance line against §3: the parallax has pulled the distance
+# posterior in tight — that part works exactly as advertised. But log g, [Fe/H]
+# and E(B-V) are **still biased**: the parallax has not moved them toward the
+# truth. It pinned the distance, and through the isochrone that *selects a point
+# along the ridge* — but selecting a point is not collapsing the ridge. The
+# point it selects is still a reddened, metal-rich, higher-gravity impostor;
+# here, with an observed parallax that happened to scatter high, it is one that
+# has slid a little *further* from the truth than the E(B-V)-free fit.
+#
+# The reason is worth internalising. The reddening ridge is a degeneracy of
+# colour *shape* — reddening reddens, metallicity moves CaHK, and the two trade
+# off. Distance is *grey*: it slides every band together and never changes a
+# colour, so the parallax picks *where along the ridge* you sit but cannot
+# arbitrate the colour-shape trade *across* it. What a parallax genuinely
+# resolves is a difference in luminosity, and along the metal-poor giant branch
+# the luminosity contrast between the competing solutions is small — a fraction
+# of a magnitude, not the ~7 mag between a dwarf and a giant.
+#
+# That is the crucial distinction from Ani's branch test. There the two
+# hypotheses are a **dwarf and a giant**, whose luminosities differ enormously,
+# so a parallax is decisive — it does the same job the isochrone already does
+# for `MISTTrack` (§3), by a different route. Neither the isochrone nor a
+# parallax touches the *intra-giant* reddening ridge; only a constraint on the
+# reddening itself (a dust map, §5) or a longer colour baseline (redder bands)
+# does.
+
+# %%
+# log g under four treatments: only the reddening constraint (fixed E(B-V))
+# lands on the truth; the parallax tracks the E(B-V)-free fit.
+fig, ax = plt.subplots(figsize=(7.2, 4.2))
 bins = np.linspace(0.0, 5.0, 60)
 for frame, lab, c in ((freeatm, "FreeAtmosphere (all free)", "0.5"),
                       (mist_free, "MISTTrack, E(B-V) free", "crimson"),
+                      (mist_plx, "MISTTrack, +parallax", "goldenrod"),
                       (mist_fix, "MISTTrack, E(B-V) fixed", "steelblue")):
     ax.hist(frame["logg"], bins=bins, density=True, histtype="stepfilled",
-            alpha=0.45, color=c, label=lab)
+            alpha=0.4, color=c, label=lab)
 ax.axvline(TRUTH_LOGG, color="k", ls="--", lw=1.5, label=f"truth ({TRUTH_LOGG:.2f})")
 ax.axvspan(3.5, 5.0, color="0.85", alpha=0.5, zorder=0)
 ax.text(4.2, ax.get_ylim()[1] * 0.9, "dwarf", ha="center", color="0.4")
 ax.set_xlabel("log g")
 ax.set_ylabel("posterior density")
-ax.set_title("Gravity: ambiguous → dwarf-free but biased → recovered")
+ax.set_title("Only a reddening constraint recovers the truth; the parallax does not")
 ax.legend(fontsize=8)
 fig.tight_layout()
 plt.show()
 
 # %% [markdown]
-# And the full corner, free versus pinned E(B-V): the free fit (crimson) is the
-# broad, offset cloud; the pinned fit (blue) is the tight knot on the
-# crosshairs.
+# The corner confirms it parameter by parameter: the parallax (gold) pulls the
+# distance axis in tight, but log g, Teff and [Fe/H] slide along the ridge
+# rather than onto the crosshairs; only fixing E(B-V) (blue) lands on the truth.
 
 # %%
 overlay_corner(
-    [mist_free, mist_fix],
+    [mist_free, mist_plx, mist_fix],
     names=["logg", "teff", "feh", "dist_pc"],
     labels=["log g", "Teff [K]", "[Fe/H]", "d [pc]"],
-    legend_labels=["E(B-V) free", "E(B-V) fixed at truth"],
-    colors=["crimson", "steelblue"],
+    legend_labels=["E(B-V) free", "+parallax", "E(B-V) fixed"],
+    colors=["crimson", "goldenrod", "steelblue"],
     truths={"logg": TRUTH_LOGG, "teff": TRUTH_TEFF, "feh": TRUTH["feh"],
             "dist_pc": TRUTH["dist_pc"]},
 )
 plt.show()
 
 # %% [markdown]
-# ## 6. What this means, and what breaks the degeneracy
+# ## 7. What this means, and what breaks the degeneracy
 #
 # The isochrone prior does exactly what it promises — and no more. It removes
 # the discrete dwarf/giant ambiguity that a radius-free grid leaves wide open
@@ -391,29 +454,32 @@ plt.show()
 # a reddening measurement out of five optical bands. When E(B-V) is free, the
 # reddening–metallicity ridge (§4) means the posterior is broad and biased —
 # and, the trap, a low-resolution sampler can report that ridge as a
-# *confident* wrong answer. Fixing E(B-V) (§5) shows the star was always
-# recoverable to <1%; the missing ingredient was never the isochrone, it was a
-# constraint on the dust.
+# *confident* wrong answer.
 #
-# Three ways to supply it, in increasing order of what they add:
+# What breaks it is a constraint on the **reddening** — a colour-shape lever:
 #
-# - **A dust-map prior on E(B-V).** For a halo star at known sky position, a
-#   3-D extinction map pins E(B-V) to a tight Gaussian — pass it as the `ebmv`
-#   prior. This is the cheapest fix and the one this notebook emulates by
-#   fixing E(B-V) outright.
+# - **A dust-map prior on E(B-V)** — the cheapest fix. For a halo star at known
+#   sky position, a 3-D extinction map pins E(B-V) to a tight Gaussian; pass it
+#   as the `ebmv` prior. Fixing E(B-V) outright (§5) recovers the star to <1%.
 # - **Redder photometry.** Reddening and temperature separate as more of the
-#   spectral energy distribution is sampled; adding near-infrared bands breaks
-#   the tilt degeneracy that u, g, r, i and CaHK cannot.
-# - **A parallax or a known distance modulus.** This is the route
-#   `tengri_stars.branch` takes: pin each isochrone hypothesis to the observed
-#   g so the absolute magnitude cancels from the colour χ², and let the
-#   parallax term arbitrate the branches (notebooks 08-10). The
-#   information-content study in notebook 07 quantifies how much each band and
-#   each external constraint is worth.
+#   SED is sampled; near-infrared bands break the tilt that u, g, r, i and CaHK
+#   cannot. Notebook 07 quantifies the per-band information content.
+#
+# A **parallax or known distance modulus** is a *distance* lever, not a
+# reddening one, and §6 shows the distinction concretely: it tightens the
+# distance sharply but leaves the reddening ridge — and the log g, Teff and
+# [Fe/H] bias — essentially intact, because distance is grey and the ridge is a
+# colour-shape trade. Its real power is on the **dwarf/giant** contrast, whose
+# ~7-mag luminosity gap a parallax resolves at once. That is the axis
+# `tengri_stars.branch` operates on: it pins each hypothesis to the observed g
+# so the absolute magnitude cancels from the colour χ², then lets the parallax
+# arbitrate the two branches (notebooks 08-10). For `MISTTrack` the isochrone
+# already closes that axis (§3), so a parallax there is confirmation, not new
+# leverage on the ridge.
 #
 # `MISTTrack` (continuous, gradient-friendly, one track) and
 # `tengri_stars.branch` (discrete, two hypotheses, parallax-weighted) are
 # complementary tools for the same problem: use the track when you have a dust
 # prior or redder data and want full posteriors with derived mass and age; use
 # the branch test when a parallax or distance modulus is the constraint you
-# have.
+# have and the dwarf/giant call is the question.
