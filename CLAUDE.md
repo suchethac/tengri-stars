@@ -18,6 +18,8 @@ Suchetha Cooray (tengri) and Ani Chiti (stars/MAGIC); lives on suchethac's GitHu
 - `src/tengri_stars/grids/photometry_grid.py` — `load_photometry_grid` FITS→LUT; prefers `averaged=True` rows, rejects duplicated label columns (`Teff_1`, …), `fill="nearest"` for coverage holes.
 - `src/tengri_stars/grids/spectral_grid.py` — `SpectralGrid.from_arrays` (spectroscopy channel).
 - `src/tengri_stars/plotting.py` — `overlay_corner` (full-range, wider corner plots).
+- `src/tengri_stars/parametrization.py` — (Suchetha, PR #7) `FreeAtmosphere` vs `MISTTrack`: sample (M_init, EEP, [Fe/H], d_pc, E(B-V)) with the isochrone as a HARD constraint — kills the discrete dwarf/giant ambiguity structurally; μ dissolves into real distance. `TSLTE_ZEROPOINT = 21.05 ± 0.056` (solar-calibrated) — resolves the zero-point open item.
+- `src/tengri_stars/grids/isochrone_grid.py` — MIST (M_init, EEP, [Fe/H]) → structure LUT; EEP as evolutionary coordinate, age weights, non-rectangular track ends handled via fraction mapping.
 - `src/tengri_stars/branch.py` — the MAGIC stitch: two-hypothesis (RGB/MS) isochrone-pinned [Fe/H] scan + Bayesian model average (`load_dartmouth_branches` in grid-color coords, `binary_scan` with profiled-μ shape χ² + color marginalization + per-star errors, `combine_mixture` with parallax term). Tested in `tests/test_branch.py`.
 - `bench/benchmark_samplers.py` — per-star sampler timings on the real grid.
 - `docs/design-2026-07-09.md` — design decisions, milestones M0–M5, open items. Read before architectural changes.
@@ -34,6 +36,7 @@ Suchetha Cooray (tengri) and Ani Chiti (stars/MAGIC); lives on suchethac's GitHu
 8. `08_rgb_ms_separability` — can photometry alone determine log g? min-χ² dwarf/giant separability maps D(Teff, [Fe/H]) over the impostor manifold (μ analytic), per-band signal, u-depth scaling, NSS validation; §7 Balmer-jump/degeneracy addendum. Answer: giants ID-able only at [Fe/H] ≳ −1; dwarfs never provable; metal-poor regime fundamentally confused.
 9. `09_branch_discrimination` — the MAGIC binary test: two isochrone-pinned (log g, μ) hypotheses at the observed (g, g−i), 1-D χ² scan in [Fe/H] per branch (no sampler). Needs Dartmouth isochrones at `~/Documents/MIT_Work/Research/magic_scratch/isochrones/`. Answer: constrained test works (P≈0.9–1.0 cool, ≥0.7 overall); u contributes; known distance decisive; Δχ²-selected [Fe/H] nearly matches the perfect-knowledge ceiling.
 10. `10_magic_stitch_validation` — the stitch (`branch.py` mixture) on REAL MAGIC paper data (paths under `/Users/Ani/Dropbox (MIT)/my_papers/magic_overview`, f9 cuts verbatim). Result: classification 0.94 vs MAGIC is_rgb 0.85 (APOGEE LOGG_SPEC truth); bias removed at equal scatter. Mock policy matrix: `bench/magic_stitch_campaign.py` → `notebooks/stitch_results/`.
+11. `11_isochrone_reddening_degeneracy` — (Suchetha) MISTTrack in action: the isochrone removes the branch ambiguity; the surviving degeneracy is the E(B-V)–[Fe/H] ridge, which a parallax does NOT break (it constrains distance, not reddening) — needs an E(B-V) prior or redder bands.
 
 Edit the `.py` side; keep the pair in sync with jupytext.
 
@@ -68,6 +71,7 @@ Notebooks resolve `data/` vs `../data/` themselves (kernel launches in `notebook
 - README mentions `tests/contract/` (tengri-surface contract tests) — not written yet; tests are flat under `tests/`.
 - TSLTE grid open items (design doc §Open items): filter convention, mag zero-point, coverage holes — confirm with Ani before regenerating or mixing grids. The TSLTE zero-point is a convention absorbed by μ, so implied distances from it are meaningless (why nb04 gives brutus no parallax).
 - brutus is an optional extra: `pip install -e ".[crossval]"`.
+- CI runs `ruff format --check`, not just `ruff check` — run `ruff format` before committing (the magic-stitch merge went red on this; fixed in PR #8).
 
 ## HANDOFF (auto-updated 2026-07-14)
 
