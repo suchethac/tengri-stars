@@ -15,10 +15,17 @@ only in what you sample and what the sampled coordinates are allowed to mean:
 :class:`MISTTrack`
     Sample ``(mini, x_eep, feh, dist_pc, ebmv)``, and let MIST decide the
     atmosphere. The isochrone is a hard constraint, not a penalty: off-track
-    (Teff, log g) is unreachable rather than merely improbable, which is what
-    breaks the dwarf/giant degeneracy in colour space. Radius comes out of the
-    track, so ``mu`` dissolves into a real distance and mass, age and radius
-    become inferred quantities instead of unavailable ones.
+    (Teff, log g) is unreachable rather than merely improbable. That removes
+    the *discrete* dwarf/giant ambiguity — a track of a given mass and age is
+    one or the other, never both, so no near-solar-gravity impostor can hide
+    at a giant's colour. It does **not** by itself break the *continuous*
+    reddening degeneracy: with ``ebmv`` free and only optical bands, an
+    unreddened metal-poor giant and a mildly reddened, more metal-rich
+    subgiant trace nearly the same colours, and the posterior stays broad and
+    skewed along that ridge until an E(B-V) prior, redder bands, or a parallax
+    pins it (see ``notebooks/11_isochrone_reddening_degeneracy``). Radius comes
+    out of the track, so ``mu`` dissolves into a real distance and mass, age
+    and radius become inferred quantities instead of unavailable ones.
 
 Switching is one line, because every sampler in :mod:`tengri_stars.inference`
 takes ``(loglikelihood_fn, priors)`` and reads its parameter names off the
@@ -188,6 +195,20 @@ class MISTTrack:
     metallicity ``feh_surf``, not the initial ``feh`` the priors act on —
     atomic diffusion separates the two by up to 0.9 dex, worst at the
     metal-poor end.
+
+    Reddening degeneracy. The isochrone fixes the dwarf/giant *branch* but
+    leaves ``ebmv`` free to trade against Teff and [Fe/H]. On five optical
+    bands (u, g, r, i, CaHK) with ``ebmv`` unconstrained, a mock halo giant
+    (Teff 4143 K, log g 0.64, [Fe/H] = -1.5, E(B-V) = 0.02) is recovered as a
+    broad ridge biased toward higher reddening and gravity — median log g
+    ~1.1, E(B-V) ~0.16 — with zero posterior mass on a dwarf, even though the
+    single best-fit point sits at the truth. Fixing E(B-V) at the truth
+    collapses the ridge and recovers every parameter to <1%. Constrain
+    reddening in practice with a dust-map prior on ``ebmv``, redder photometry,
+    or a parallax (``distance_prior='none'`` with a Gaussian ``dist_pc``); the
+    discrete branch test in :mod:`tengri_stars.branch` is the complementary
+    route when a parallax or known distance modulus is available. See
+    ``notebooks/11_isochrone_reddening_degeneracy``.
 
     JIT/grad/vmap-safe throughout.
     """
