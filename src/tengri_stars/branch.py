@@ -102,9 +102,7 @@ def load_dartmouth_branches(
     if gi_grid is None:
         gi_grid = np.arange(0.40, 2.4001, 0.005)
     feh_nodes = np.array(sorted(iso_files))
-    mags_at = jax.jit(
-        jax.vmap(lambda t, g, f: model.predict_mags(teff=t, logg=g, feh=f))
-    )
+    mags_at = jax.jit(jax.vmap(lambda t, g, f: model.predict_mags(teff=t, logg=g, feh=f)))
 
     tables = {
         b: {q: np.full((feh_nodes.size, gi_grid.size), np.nan) for q in ("teff", "logg", "mg")}
@@ -213,9 +211,7 @@ def binary_scan(
     gi_center = observed[:, ig] - observed[:, ii]
     gi_grid, feh_scan = tables.gi_grid, tables.feh_scan
 
-    mags_at = jax.jit(
-        jax.vmap(lambda t, g, f: model.predict_mags(teff=t, logg=g, feh=f))
-    )
+    mags_at = jax.jit(jax.vmap(lambda t, g, f: model.predict_mags(teff=t, logg=g, feh=f)))
     n_obs, n_scan, n_bands = observed.shape[0], feh_scan.size, observed.shape[1]
     cb = np.asarray(chi2_bands, dtype=int)
 
@@ -360,8 +356,15 @@ def combine_mixture(
         if parallax is not None:
             dm_b = g_obs[None, :] - scans[b]["mg"]  # (n_scan, n_obs)
             plx_pred = 10.0 ** (2.0 - dm_b / 5.0)  # [mas]
-            lw = lw - 0.5 * ((np.asarray(parallax)[None, :] - plx_pred)
-                             / np.asarray(parallax_error)[None, :]) ** 2
+            lw = (
+                lw
+                - 0.5
+                * (
+                    (np.asarray(parallax)[None, :] - plx_pred)
+                    / np.asarray(parallax_error)[None, :]
+                )
+                ** 2
+            )
         logw[b] = lw + np.log(priors[b])
 
     # normalize jointly per star; a star outside both branch windows has no
@@ -383,5 +386,11 @@ def combine_mixture(
         idx = np.clip(np.argmax(cdf >= q, axis=0), 0, feh_scan.size - 1)
         dest[:] = np.where(dead, np.nan, feh_scan[idx])
 
-    return {"p_rgb": p_rgb, "feh": feh_med, "feh_lo": feh_lo, "feh_hi": feh_hi,
-            "weights": w, "invalid": dead}
+    return {
+        "p_rgb": p_rgb,
+        "feh": feh_med,
+        "feh_lo": feh_lo,
+        "feh_hi": feh_hi,
+        "weights": w,
+        "invalid": dead,
+    }
