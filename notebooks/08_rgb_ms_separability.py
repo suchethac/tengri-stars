@@ -5,6 +5,8 @@
 #     text_representation:
 #       extension: .py
 #       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.4
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -59,7 +61,7 @@ jax.config.update("jax_enable_x64", True)
 rng = np.random.default_rng(37)
 
 # %% [markdown]
-# ## 1. Setup — same bands and depths as notebook 06
+# ## 1. Setup — same bands and depths as notebook 07
 
 # %%
 BANDS = ("lsst_u_ab", "CaHK_filter_ab", "lsst_g_ab", "lsst_r_ab", "lsst_i_ab")
@@ -278,7 +280,7 @@ for teff, feh in TEST_POINTS:
 #   mimic" verdict may be an artifact of missing models rather than physics.
 # - **Practical consequence for the survey case:** metal-poor targets need
 #   the external gravity (parallax × isochrone radius link, as in MAGIC's
-#   iteration — or as a (log g, μ) prior in the joint fit, notebook 06 §7).
+#   iteration — or as a (log g, μ) prior in the joint fit, notebook 07 §7).
 #   The five bands *can* self-classify the metal-rich giants, e.g. for
 #   contamination control in RGB-selected samples.
 

@@ -2,9 +2,9 @@
 
 Twelve configs — policies {magic-hard, hard-vote, mixture} × parallax quality
 {none, p50, p20, knownDM} — each scoring the same self-consistent isochrone mocks
-(notebook 08 pattern) with `tengri_stars.branch`. One CSV per config; a config is
+(notebook 09 pattern) with `tengri_stars.branch`. One CSV per config; a config is
 "done" iff its CSV exists (resumable; delete to redo). Real-data validation lives in
-notebook 09, not here.
+notebook 10, not here.
 
 Run from the repo root in the ARM tengri env:
     JAX_PLATFORMS=cpu python bench/magic_stitch_campaign.py --next

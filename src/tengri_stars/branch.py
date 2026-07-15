@@ -18,7 +18,7 @@ term (or a known distance modulus), where the branch-implied
 :math:`{\\rm DM}_b = g_{\\rm obs} - M_{g,b}` is *physical* — built from the
 isochrone's M_g, independent of the photometry grid's zero-point convention.
 
-Validated in ``notebooks/08_branch_discrimination`` (noiseless closure;
+Validated in ``notebooks/09_branch_discrimination`` (noiseless closure;
 regime maps); the color coordinate of the branch tables is the *grid's* g−i
 evaluated at the isochrone's (Teff, log g, [Fe/H]) so that data and hypothesis
 chain share one color system — Dartmouth-native colors disagree with the grid

@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GRID_PATH = ROOT / "data" / "TSLTE_combined_photometry.fits"
 RESULTS = ROOT / "notebooks" / "forecast_results"
 
-# All five bands, with the assumed 1σ photometric errors [mag] (notebook 06).
+# All five bands, with the assumed 1σ photometric errors [mag] (notebook 07).
 ALL_BANDS = ("lsst_u_ab", "CaHK_filter_ab", "lsst_g_ab", "lsst_r_ab", "lsst_i_ab")
 ALL_SIGMA = {"lsst_u_ab": 0.05, "CaHK_filter_ab": 0.03, "lsst_g_ab": 0.02,
              "lsst_r_ab": 0.02, "lsst_i_ab": 0.02}
@@ -52,7 +52,7 @@ CONFIGS = {
     "ugi": (0, 2, 4),              # LSST-only 3-band, no CaHK
 }
 
-# Mock sweep, identical to notebook 06 §4.
+# Mock sweep, identical to notebook 07 §4.
 TEFF_SWEEP = (4000.0, 4500.0, 5000.0, 5500.0)
 FEH_SWEEP = (-3.0, -2.0, -1.0)
 CLASSES = (("RGB", 2.0), ("MS", 4.6))

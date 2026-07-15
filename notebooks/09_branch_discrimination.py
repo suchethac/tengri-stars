@@ -5,6 +5,8 @@
 #     text_representation:
 #       extension: .py
 #       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.4
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -22,7 +24,7 @@
 # two fully-specified hypotheses, and what the [Fe/H] penalty is when it
 # cannot.
 #
-# This is a far more constrained problem than notebook 07's free-impostor
+# This is a far more constrained problem than notebook 08's free-impostor
 # maps: there the mimic wandered in (Teff′, [Fe/H]′, μ′); here both
 # hypotheses must reproduce the observed g and g−i, leaving only [Fe/H] free
 # per branch (MAGIC iterates it). No sampler is needed — per branch the fit
@@ -400,7 +402,7 @@ plt.show()
 # Left: where the Δχ² vote fails. Middle: where being wrong is expensive.
 # Right: the expected penalty of three policies — the Δχ² vote, a coin flip
 # (what an unconstrained fit without distance information effectively gives,
-# notebooks 06–07), and always-wrong (worst case).
+# notebooks 07–08), and always-wrong (worst case).
 
 # %%
 FEH_SHOW = -2.0
@@ -479,7 +481,7 @@ plt.show()
 # - **The u band earns its keep here.** Dropping u costs 5–13 points of
 #   classification accuracy nearly everywhere — in the *constrained* test the
 #   u-band gravity signal is no longer absorbed by Teff/μ shifts, unlike in
-#   the free fit of notebooks 06–07.
+#   the free fit of notebooks 07–08.
 # - **A known distance settles it entirely** (P ≈ 0.98–1.00 at every point):
 #   with DM fixed, the ΔM_g ≈ 3–10 mag luminosity gap between hypotheses is
 #   decisive. For dSph/stream/cluster work — the MAGIC science case — branch
@@ -496,7 +498,7 @@ plt.show()
 # that the selected-branch [Fe/H] loses almost nothing — and the vote should
 # include u. The remaining hard corner is warm (near-turnoff) and very
 # metal-poor field stars, where the honest answer is the branch-marginalized
-# posterior of notebook 06.
+# posterior of notebook 07.
 #
 # Caveats: mocks and hypotheses share the same grid and isochrones — real
 # grid–isochrone mismatch (and the age assumption, 12 Gyr here) adds
